@@ -33,9 +33,24 @@ FIXTURE_NAMES = sorted(p.name for p in FIXTURES_DIR.glob("*_batch.json"))
 # Anchored families the iOS extractor emits through ``v2SampleBaseDict`` —
 # every sample MUST carry the identity + interval + local-offset keys.
 _ANCHORED_KEYS = {"uuid", "startDate", "endDate", "tzOffsetMinutes"}
-# Date-only aggregates legitimately carry no identity (HKStatistics /
-# HKActivitySummary are not HKSamples).
+# Date-bucketed aggregates are not HKSamples, so they carry no `uuid`. That is
+# the ONLY v2 key they are exempt from. The previous blanket `continue` here
+# excused them from `unit`, `startDate`/`endDate` and `tzOffsetMinutes` too —
+# which turned a real limitation ("a statistics bucket has no HKSample
+# identity") into a pinned requirement, and left ~60 cumulative metrics on the
+# v1 shape inside a `schema_version: 2` envelope.
 _AGGREGATE_FIXTURES = {"step_count_batch.json", "activity_summaries_batch.json"}
+
+# Aggregates that declare `aggregation: "day_total"` and carry the local-midnight
+# window, unit and offset.
+_DAY_TOTAL_FIXTURES = {"step_count_batch.json"}
+
+# The one family still on the pre-v2 shape. `activity_summaries` is a
+# multi-metric composite (activeEnergyBurned + goals + exercise time in one
+# dict) that the server fans out, so making it self-describing is a separate
+# change. Named so the gap stays visible instead of hiding inside the aggregate
+# exemption.
+_LEGACY_AGGREGATE_FIXTURES = {"activity_summaries_batch.json"}
 # Category events carry ``qty`` as a duration in seconds with no unit key —
 # the ontology has no quantity definition for them, so the unit gate is
 # lenient by design (matches the extractor).
@@ -85,6 +100,23 @@ def test_fixture_validates_as_v2_payload(name: str) -> None:
         if name in _AGGREGATE_FIXTURES:
             assert "uuid" not in dumped, f"{name}: aggregates carry no HKSample identity"
             assert "date" in dumped
+            if name in _DAY_TOTAL_FIXTURES:
+                assert dumped.get("aggregation") == "day_total", (
+                    f"{name}: a day total must DECLARE its scope — the server "
+                    "must never have to infer it from the source label"
+                )
+                for key in ("localDate", "startDate", "endDate", "tzOffsetMinutes"):
+                    assert key in dumped, f"{name}: day total missing {key}: {dumped}"
+                if "qty" in dumped:
+                    assert dumped.get("unit"), f"{name}: day total must declare its unit"
+                assert dumped.get("date") == dumped["startDate"], (
+                    f"{name}: day total lost the v1 date key"
+                )
+            else:
+                assert name in _LEGACY_AGGREGATE_FIXTURES, (
+                    f"{name}: a new aggregate family must either declare "
+                    "`aggregation` or be recorded as a known legacy shape"
+                )
             continue
         missing = _ANCHORED_KEYS - set(dumped)
         assert not missing, f"{name}: anchored sample missing v2 keys {sorted(missing)}: {dumped}"
