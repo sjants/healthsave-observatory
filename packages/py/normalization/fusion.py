@@ -32,19 +32,17 @@ from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 from uuid import UUID
 
+from contracts.aggregation import AggregationScope
+
 from normalization.identity import normalize_origin
 
+#: Re-exported so callers that decide WITH the scope (``can_sum``,
+#: ``preferred_read_scope``, ``classify_wire_aggregation_scope``) can import the
+#: vocabulary and the rules from one place. Canonical home is
+#: :mod:`contracts.aggregation`.
+__all__ = ["AggregationScope"]
 
-class AggregationScope(StrEnum):
-    """What a cumulative value actually covers. Values across scopes are NEVER
-    summed and NEVER fused — a daily total is not its own 15-minute components,
-    and a provider/all-source aggregate is not a single device's contribution."""
 
-    INTERVAL_COMPONENT = "interval_component"
-    DEVICE_DAY_TOTAL = "device_day_total"
-    PROVIDER_ACCOUNT_DAY_TOTAL = "provider_account_day_total"
-    PROVIDER_RECONCILED_DAY_TOTAL = "provider_reconciled_day_total"
-    OWNER_ALL_SOURCE_DAY_TOTAL = "owner_all_source_day_total"
 
 
 class DeviceLinkConfidence(StrEnum):

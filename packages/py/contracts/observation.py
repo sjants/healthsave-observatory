@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 from pydantic import Field
 
 from ._base import DeviceId, MeasurementId, Provenance, SourceId, WithOwnership
+from .aggregation import AggregationScope
 from .ontology import ONTOLOGY_VERSION, MetricId
 from .values import ObservationValue
 
@@ -38,7 +39,7 @@ class Observation(WithOwnership):
     exact_ingest_key: str | None = None
     semantic_key: str | None = None
     semantic_key_version: str | None = None
-    aggregation_scope: str = "interval_component"
+    aggregation_scope: AggregationScope = AggregationScope.INTERVAL_COMPONENT
     is_primary: bool = True
     raw_payload_id: UUID | None = None
     source_record_uid: str | None = None
