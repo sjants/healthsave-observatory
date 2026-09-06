@@ -70,12 +70,13 @@ import json
 import logging
 import os
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from compat_v1.models import BatchPayload  # noqa: F401  (used by sibling v1 tests)
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from normalization import apple_wire_metric
+from normalization.fusion import WIRE_AGGREGATION_SCOPES
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from storage.defaults import observation_repository
@@ -143,6 +144,40 @@ _UUID_RE = re.compile(
 )
 
 
+_LOCAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _require_local_date_agrees(idx: int, sample: V2Sample) -> None:
+    """``localDate`` must be the calendar day ``startDate`` falls on locally.
+
+    Only checked when the sample carries both ``startDate`` and
+    ``tzOffsetMinutes`` — the two facts needed to derive the local day. A
+    mismatch means the client's notion of "which day does this belong to"
+    disagrees with the instant it sent, and silently picking one would corrupt
+    every downstream local-day rollup (sleep, daily RHR, water). Deterministic
+    -> 422.
+    """
+    if sample.startDate is None or sample.localDate is None:
+        return
+    if sample.tzOffsetMinutes is None:
+        return
+    try:
+        start = datetime.fromisoformat(sample.startDate.replace("Z", "+00:00"))
+    except ValueError:
+        # Format already vetted leniently at the field layer; the normalizer
+        # owns strict time parsing. Nothing to cross-check.
+        return
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=UTC)
+    local_day = (start + timedelta(minutes=sample.tzOffsetMinutes)).date().isoformat()
+    if local_day != sample.localDate:
+        raise ValueError(
+            f"samples[{idx}].localDate {sample.localDate!r} disagrees with "
+            f"startDate {sample.startDate!r} at tzOffsetMinutes="
+            f"{sample.tzOffsetMinutes} (which lands on {local_day})"
+        )
+
+
 class V2Sample(BaseModel):
     """Per-sample dict for the v2 wire — the transport envelope.
 
@@ -180,6 +215,33 @@ class V2Sample(BaseModel):
     value: str | int | float | None = Field(default=None)
     date: str | None = Field(default=None)
     endDate_iso: str | None = Field(default=None)
+    # Aggregation declaration (iOS 1.8.0+). Absent means a client <= 1.7.2,
+    # whose scope is inferred by ``classify_wire_aggregation_scope``. Format
+    # only here; the shape rules live in ``_sample_contract``.
+    aggregation: str | None = Field(default=None)
+    # The local calendar day a day_total covers. A day total's identity is
+    # (metric, local day) — not an instant — so the server never has to
+    # re-derive "which day is this" from a timestamp plus an offset, which is
+    # exactly the logic that breaks across DST and travel.
+    localDate: str | None = Field(default=None)
+
+    @field_validator("aggregation")
+    @classmethod
+    def _validate_aggregation(cls, v: str | None) -> str | None:
+        # Eric's principle: reject an ambiguous payload outright rather than
+        # guess at it. An unrecognized value is deterministic -> 422.
+        if v is not None and v not in WIRE_AGGREGATION_SCOPES:
+            raise ValueError(
+                f"aggregation must be one of {sorted(WIRE_AGGREGATION_SCOPES)}; got {v!r}"
+            )
+        return v
+
+    @field_validator("localDate")
+    @classmethod
+    def _validate_local_date(cls, v: str | None) -> str | None:
+        if v is not None and not _LOCAL_DATE_RE.match(v):
+            raise ValueError("localDate must be a YYYY-MM-DD calendar date")
+        return v
 
     @field_validator("uuid")
     @classmethod
@@ -338,7 +400,39 @@ class V2AppleBatchPayload(BaseModel):
         metric_def = apple_wire_metric(self.metric.strip())
         for idx, sample in enumerate(self.samples):
             anchored = sample.startDate is not None or sample.start is not None
-            if anchored and sample.uuid is None:
+            is_day_total = sample.aggregation == "day_total"
+
+            # Aggregation gate. A day total is an HKStatistics bucket: it now
+            # carries the local-midnight interval so a consumer can see the
+            # measurement window, but it has NO HKSample identity by
+            # construction. Without this branch the identity gate below would
+            # 422 every day total the moment iOS started sending startDate —
+            # a deterministic wedge for the whole cumulative family.
+            if is_day_total:
+                if sample.uuid is not None:
+                    raise ValueError(
+                        f"samples[{idx}].uuid present on a day_total: an "
+                        "HKStatistics bucket has no HKSample identity; its "
+                        "identity is (metric, localDate)"
+                    )
+                if sample.localDate is None:
+                    raise ValueError(
+                        f"samples[{idx}].localDate missing: a day_total is "
+                        "identified by the local calendar day it covers"
+                    )
+                if sample.startDate is None or sample.endDate is None:
+                    raise ValueError(
+                        f"samples[{idx}]: a day_total must carry startDate and "
+                        "endDate (the local-midnight bounds of the day it covers)"
+                    )
+                _require_local_date_agrees(idx, sample)
+            elif sample.aggregation == "component" and not anchored:
+                raise ValueError(
+                    f"samples[{idx}].startDate missing: a component is one raw "
+                    "HKSample and must carry its interval"
+                )
+
+            if anchored and sample.uuid is None and not is_day_total:
                 raise ValueError(
                     f"samples[{idx}].uuid missing: anchored samples "
                     "(startDate/start present) must carry the HKSample UUID "
@@ -378,7 +472,16 @@ class V2AppleBatchPayload(BaseModel):
                 # (HealthTypes.swift), so the normalizer's canonical-unit
                 # fallback is exact, and demanding the key would wedge the
                 # committed wire which never sends it on aggregates.
-                if anchored and sample.qty is not None and sample.unit is None:
+                if (
+                    (anchored or is_day_total)
+                    and sample.qty is not None
+                    and sample.unit is None
+                    # Clients <= 1.7.2 send date-only aggregates with no unit
+                    # and no `aggregation`; the normalizer's canonical-unit
+                    # fallback is exact for them. Only a sample that DECLARES
+                    # day_total (1.8.0+) is held to the unit rule.
+                    and (anchored or sample.aggregation is not None)
+                ):
                     raise ValueError(
                         f"samples[{idx}].unit missing: anchored quantity samples "
                         f"(qty present) for metric {self.metric!r} must declare "

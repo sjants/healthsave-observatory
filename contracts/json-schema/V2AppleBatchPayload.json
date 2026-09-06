@@ -21,6 +21,18 @@
       "additionalProperties": true,
       "description": "Per-sample dict for the v2 wire \u2014 the transport envelope.\n\nField-level validation here covers FORMAT only (UUID shape, ISO\nstrings, tz/motion ranges) for whatever keys the sample carries.\nWhich keys a sample MUST carry is a function of the batch's metric \u2014\nHealthKit's seven emission families legitimately differ (anchored\nquantity samples carry uuid/startDate/endDate/unit; HKStatistics\naggregates carry date+qty only; workouts, sleep, ECG and medication\ncarry no qty/unit). Enforcing one family's shape on all of them\n422'd six of seven families deterministically \u2014 a Law-6 wedge for\nevery frozen client. The metric-keyed semantic gate lives in\n``V2AppleBatchPayload._sample_contract`` where the ontology answers\nwhich contract applies.\n\nLoose ``extra='allow'`` so future additive fields don't break\nshipped v2 clients (same forward-compat posture the v1 route has).",
       "properties": {
+        "aggregation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aggregation"
+        },
         "date": {
           "anyOf": [
             {
@@ -83,6 +95,18 @@
           ],
           "default": null,
           "title": "Enddate Iso"
+        },
+        "localDate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Localdate"
         },
         "motionContext": {
           "anyOf": [
