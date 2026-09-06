@@ -43,14 +43,18 @@ _AGGREGATE_FIXTURES = {"step_count_batch.json", "activity_summaries_batch.json"}
 
 # Aggregates that declare `aggregation: "day_total"` and carry the local-midnight
 # window, unit and offset.
-_DAY_TOTAL_FIXTURES = {"step_count_batch.json"}
+_DAY_TOTAL_FIXTURES = {"step_count_batch.json", "activity_summaries_batch.json"}
 
-# The one family still on the pre-v2 shape. `activity_summaries` is a
-# multi-metric composite (activeEnergyBurned + goals + exercise time in one
-# dict) that the server fans out, so making it self-describing is a separate
-# change. Named so the gap stays visible instead of hiding inside the aggregate
-# exemption.
-_LEGACY_AGGREGATE_FIXTURES = {"activity_summaries_batch.json"}
+# `activity_summaries` is a COMPOSITE day total: several daily totals in one
+# dict, fanned out per wire metric by `_expand_activity_summary_sample`. One
+# `unit` key cannot describe it, so its units travel as a map keyed by field.
+# This is the family `active_energy_burned` actually arrives through.
+_COMPOSITE_DAY_TOTAL_FIXTURES = {"activity_summaries_batch.json"}
+
+# Aggregate families still on the pre-v2 shape. Empty by design — a new one
+# must be a deliberate, named decision, not an omission that the aggregate
+# exemption quietly absorbs.
+_LEGACY_AGGREGATE_FIXTURES: set[str] = set()
 # Category events carry ``qty`` as a duration in seconds with no unit key —
 # the ontology has no quantity definition for them, so the unit gate is
 # lenient by design (matches the extractor).
@@ -107,7 +111,26 @@ def test_fixture_validates_as_v2_payload(name: str) -> None:
                 )
                 for key in ("localDate", "startDate", "endDate", "tzOffsetMinutes"):
                     assert key in dumped, f"{name}: day total missing {key}: {dumped}"
-                if "qty" in dumped:
+                if name in _COMPOSITE_DAY_TOTAL_FIXTURES:
+                    # Every measured field declares its own unit, so a consumer
+                    # never has to know activeEnergyBurned is kcal while
+                    # appleExerciseTime is minutes.
+                    units = dumped.get("units")
+                    assert isinstance(units, dict) and units, (
+                        f"{name}: a composite day total must carry a per-field units map"
+                    )
+                    measured = {
+                        key
+                        for key, value in dumped.items()
+                        if isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and key != "tzOffsetMinutes"
+                    }
+                    missing_units = measured - set(units)
+                    assert not missing_units, (
+                        f"{name}: no unit declared for {sorted(missing_units)}"
+                    )
+                elif "qty" in dumped:
                     assert dumped.get("unit"), f"{name}: day total must declare its unit"
                 assert dumped.get("date") == dumped["startDate"], (
                     f"{name}: day total lost the v1 date key"

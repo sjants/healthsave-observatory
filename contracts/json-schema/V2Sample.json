@@ -177,6 +177,21 @@
       "default": null,
       "title": "Unit"
     },
+    "units": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Units"
+    },
     "uuid": {
       "anyOf": [
         {

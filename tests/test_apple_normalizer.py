@@ -240,6 +240,55 @@ def test_activity_summaries_batch_expands_into_per_metric_observations() -> None
         assert obs.exact_ingest_key is not None
 
 
+def test_activity_summaries_fan_out_carries_the_summary_self_description() -> None:
+    """The composite's v2 keys must survive the fan-out.
+
+    `active_energy_burned` reaches a third-party ingest through THIS family, not
+    through the daily-statistics one — Eric's "active energy arrives only as a
+    daily total, no UUID, no unit" is this code path. The expansion previously
+    kept only the time and origin keys, so anything the summary declared about
+    itself was dropped before `_normalize_sample` ever saw it, and every derived
+    sample fell back to the legacy origin sniff.
+    """
+    result = normalize_apple_batch(
+        {
+            "metric": "activity_summaries",
+            "samples": [
+                {
+                    "aggregation": "day_total",
+                    "localDate": "2026-08-30",
+                    "startDate": "2026-08-30T04:00:00.000Z",
+                    "endDate": "2026-08-31T04:00:00.000Z",
+                    "date": "2026-08-30T04:00:00.000Z",
+                    "tzOffsetMinutes": -240,
+                    "activeEnergyBurned": 412.0,
+                    "appleExerciseTime": 31.0,
+                    "units": {
+                        "activeEnergyBurned": "kcal",
+                        "appleExerciseTime": "min",
+                    },
+                }
+            ],
+        },
+        source_id=_SOURCE,
+        provenance=_PROV,
+    )
+    by_metric = {o.metric_id: o for o in result.observations}
+    assert "activity.active_energy" in by_metric
+    assert "activity.exercise_minutes" in by_metric
+
+    for obs in result.observations:
+        # Declared, not sniffed.
+        assert obs.aggregation_scope == "owner_all_source_day_total"
+        # The per-sample local offset rides onto provenance so downstream
+        # "which local day" derivation is engine-side, not guesswork.
+        assert obs.provenance.tz_offset_minutes == -240
+
+    # Each derived sample got the unit for ITS field — not one unit for all.
+    assert by_metric["activity.active_energy"].value.canonical_unit == "kcal"
+    assert by_metric["activity.exercise_minutes"].value.canonical_unit == "min"
+
+
 def test_activity_summaries_same_day_revision_keeps_stable_identity() -> None:
     def normalize(active_energy: float):
         result = normalize_apple_batch(

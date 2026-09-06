@@ -408,15 +408,40 @@ def _expand_activity_summary_sample(sample: dict[str, Any]) -> list[tuple[str, d
     — otherwise a later sync that revises the day's total would append a second
     observation instead of replacing the first (value_repr-based dedup_key).
     """
-    shared_keys = {*_TIME_KEYS, *_END_KEYS, "source", "sourceName", "device", "deviceName"}
+    # ``aggregation``/``localDate``/``tzOffsetMinutes`` ride along with the time
+    # and origin keys (iOS 1.8.0+). Without them here the fan-out would strip the
+    # very self-description the summary now carries, and each derived sample
+    # would fall back to the legacy origin sniff.
+    shared_keys = {
+        *_TIME_KEYS,
+        *_END_KEYS,
+        "source",
+        "sourceName",
+        "device",
+        "deviceName",
+        "aggregation",
+        "localDate",
+        "tzOffsetMinutes",
+    }
     shared = {key: value for key, value in sample.items() if key in shared_keys}
     if not any(shared.get(k) for k in ("source", "sourceName", "device", "deviceName")):
         shared["source"] = HEALTHKIT_STATISTICS_ORIGIN
+    # A summary is a composite, so one ``unit`` key cannot describe it — the
+    # client sends a per-field map instead. Each derived sample gets the unit
+    # for ITS field; absent (clients <= 1.7.2) the normalizer's canonical-unit
+    # fallback applies, which is exact because HealthKit reads each summary
+    # field in a fixed unit.
+    units = sample.get("units")
+    units = units if isinstance(units, dict) else {}
     expanded: list[tuple[str, dict[str, Any]]] = []
     for field_name, wire_metric in _ACTIVITY_SUMMARY_FIELD_TO_WIRE_METRIC.items():
         if sample.get(field_name) is None:
             continue
-        expanded.append((wire_metric, {**shared, "qty": sample[field_name]}))
+        derived: dict[str, Any] = {**shared, "qty": sample[field_name]}
+        field_unit = units.get(field_name)
+        if isinstance(field_unit, str) and field_unit:
+            derived["unit"] = field_unit
+        expanded.append((wire_metric, derived))
     return expanded
 
 

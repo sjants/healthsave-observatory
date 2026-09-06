@@ -224,6 +224,12 @@ class V2Sample(BaseModel):
     # re-derive "which day is this" from a timestamp plus an offset, which is
     # exactly the logic that breaks across DST and travel.
     localDate: str | None = Field(default=None)
+    # Per-field units for a COMPOSITE day total (``activity_summaries`` bundles
+    # activeEnergyBurned + exercise time + stand hours in one dict, which the
+    # server fans out per metric). One scalar ``unit`` cannot describe it.
+    # Declared rather than left to ``extra='allow'`` so it appears in the
+    # published JSON schema a third-party ingest reads.
+    units: dict[str, str] | None = Field(default=None)
 
     @field_validator("aggregation")
     @classmethod
