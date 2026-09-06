@@ -472,12 +472,15 @@ class V2AppleBatchPayload(BaseModel):
                 # unitString spellings included via the 2026.09.0 ontology
                 # revision). Unknown unit is deterministic → 422.
                 #
-                # Date-only HKStatistics aggregates are exempt: the
-                # statistics query reads every cumulative type in the
-                # metric's canonical unit by construction
-                # (HealthTypes.swift), so the normalizer's canonical-unit
-                # fallback is exact, and demanding the key would wedge the
-                # committed wire which never sends it on aggregates.
+                # Date-only aggregates from a client <= 1.7.2 are exempt: the
+                # statistics query reads every cumulative type in the metric's
+                # canonical unit by construction (HealthTypes.swift), so the
+                # normalizer's canonical-unit fallback is exact, and demanding
+                # the key would wedge a committed wire that never sent it.
+                #
+                # "which never sends it on aggregates" stopped being true when
+                # iOS 1.8.0 started declaring `aggregation: "day_total"` — a
+                # sample that DECLARES its scope is held to the unit rule.
                 if (
                     (anchored or is_day_total)
                     and sample.qty is not None

@@ -755,10 +755,46 @@ legitimate shapes per batch type:
 | `startDate` | ISO-8601 with offset | required on anchored samples | Legacy `start` accepted for the migration window |
 | `endDate` | ISO-8601 with offset | required on anchored samples | The end bound is what distinguishes a RHR revision from a duplicate |
 | `qty` | number | required (quantity) | |
-| `unit` | UCUM (`HKUnit.unitString`) | required when `qty` + anchored | Validated against the metric's `allowed_units` (HealthKit spellings included); unknown unit → `422` (deterministic, frozen-client-safe). Date-only aggregates fall back to the exact canonical unit |
+| `unit` | UCUM (`HKUnit.unitString`) | required when `qty` + anchored, and on a declared `day_total` | Validated against the metric's `allowed_units` (HealthKit spellings included); unknown unit → `422` (deterministic, frozen-client-safe). Date-only aggregates from a client ≤ 1.7.2 send no unit and fall back to the exact canonical unit |
 | `tzOffsetMinutes` | int (-1440…+1440) | optional | Server stamps the offset on the raw payload + the canonical row's provenance |
 | `motionContext` | enum | optional (HR only) | `sedentary` / `active` / `notSet`; omitted means "not present on the sample" |
 | `source` | string | required | |
+| `aggregation` | `component` \| `day_total` | optional (iOS 1.8.0+) | Declares what the value covers instead of leaving the server to infer it. Unknown value → `422`; it is never guessed. Absent ⇒ a client ≤ 1.7.2 and the legacy inference applies |
+| `localDate` | `YYYY-MM-DD` | required on `day_total` | The local calendar day the total covers. A day total's identity is `(metric, local day)`, not an instant — sending it means the server never re-derives "which day is this" from a timestamp plus an offset. Cross-checked against `startDate` + `tzOffsetMinutes`; a disagreement is `422` |
+| `units` | object `{field: unit}` | required on a COMPOSITE `day_total` | `activity_summaries` bundles several daily totals in one dict (kcal, minutes, a count) which the server fans out per metric, so one scalar `unit` cannot describe it |
+
+#### Aggregation scope — what a value actually covers
+
+Every stored observation carries an `aggregation_scope`, surfaced on
+`GET /api/v2/metrics/{id}/series` and typed in the published TypeScript client.
+Two of its values are assertable on the wire:
+
+| Wire `aggregation` | Stored `aggregation_scope` | Meaning |
+|---|---|---|
+| `component` | `interval_component` | One raw sample — one contribution to a larger total |
+| `day_total` | `owner_all_source_day_total` | HealthKit's own all-source deduplicated total for one local day |
+
+The remaining scopes (`device_day_total`, `provider_account_day_total`,
+`provider_reconciled_day_total`) describe vendor connectors and **cannot** be
+claimed by a HealthKit client.
+
+**The rule that matters for anyone building against this: values in different
+scopes are never summed and never fused.** A daily total is not its own
+components, and an all-source aggregate is not one device's contribution. Sum a
+day total together with the raw samples it already contains and you double-count.
+The server enforces this by selecting a single scope for every rollup rather than
+mixing them (`normalization.fusion.can_sum` states the rule;
+`preferred_read_scope` picks the side).
+
+A cumulative metric can legitimately hold BOTH scopes for the same day. That is
+not a duplicate — it is the day's authoritative total plus the intra-day shape
+that makes it up. Read one or the other, never the union.
+
+Where a client sends no `aggregation` (iOS ≤ 1.7.2), the server infers: an
+HKSample `uuid` means a component; otherwise a daily-total metric whose `source`
+is the literal `"HealthKit Statistics"` is treated as a day total. That
+inference is retained permanently for shipped binaries, but new clients should
+declare.
 
 ### Top-level keys
 
