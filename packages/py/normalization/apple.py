@@ -19,7 +19,11 @@ from contracts.ontology import REGISTRY, MetricDefinition
 from contracts.values import CodedValue, EventValue, ObservationValue, QuantityValue
 
 from . import identity
-from .fusion import AggregationScope
+from .fusion import (
+    HEALTHKIT_STATISTICS_ORIGIN,
+    AggregationScope,
+    classify_wire_aggregation_scope,
+)
 from .fusion import exact_ingest_key as build_exact_ingest_key
 from .parsers import sample_device_name
 
@@ -53,8 +57,6 @@ _ACTIVITY_SUMMARY_FIELD_TO_WIRE_METRIC: dict[str, str] = {
     "appleExerciseTime": "apple_exercise_time",
 }
 
-_HEALTHKIT_STATISTICS_ORIGIN = "HealthKit Statistics"
-_HEALTHKIT_STATISTICS_ORIGIN_KEY = identity.normalize_origin(_HEALTHKIT_STATISTICS_ORIGIN)
 _DAILY_TOTAL_OBJECT_TYPE = "apple_healthkit_daily_total"
 
 _TIME_KEYS = ("date", "startDate", "start", "start_date")
@@ -318,11 +320,21 @@ def _normalize_sample(
     # total per local calendar day. A later sync may revise that same total, so its
     # source-local identity must exclude the value while preserving the exact local-
     # midnight instant (04:00Z/05:00Z across New York DST, for example).
-    if (
-        metric.aggregation.kind == "daily_total"
-        and value.type == "quantity"
-        and stream.origin_key == _HEALTHKIT_STATISTICS_ORIGIN_KEY
-    ):
+    # The scope is now RESOLVED, not sniffed. ``classify_wire_aggregation_scope``
+    # prefers the explicit ``samples[].aggregation`` key and falls back to the
+    # legacy "HealthKit Statistics" origin match only for clients <= 1.7.2. The
+    # v1 projection in ``storage.timescale.measurements`` calls the same function,
+    # so the legacy tables and the canonical store cannot disagree about whether a
+    # row is a day total or one component of one.
+    resolved_scope = classify_wire_aggregation_scope(
+        declared=sample.get("aggregation"),
+        has_identity=source_record_uid is not None,
+        metric_is_daily_total=(
+            metric.aggregation.kind == "daily_total" and value.type == "quantity"
+        ),
+        origin_key=stream.origin_key,
+    )
+    if resolved_scope is AggregationScope.OWNER_ALL_SOURCE_DAY_TOTAL:
         aggregation_scope = AggregationScope.OWNER_ALL_SOURCE_DAY_TOTAL.value
         exact_ingest_key = build_exact_ingest_key(
             owner_id,
@@ -399,7 +411,7 @@ def _expand_activity_summary_sample(sample: dict[str, Any]) -> list[tuple[str, d
     shared_keys = {*_TIME_KEYS, *_END_KEYS, "source", "sourceName", "device", "deviceName"}
     shared = {key: value for key, value in sample.items() if key in shared_keys}
     if not any(shared.get(k) for k in ("source", "sourceName", "device", "deviceName")):
-        shared["source"] = _HEALTHKIT_STATISTICS_ORIGIN
+        shared["source"] = HEALTHKIT_STATISTICS_ORIGIN
     expanded: list[tuple[str, dict[str, Any]]] = []
     for field_name, wire_metric in _ACTIVITY_SUMMARY_FIELD_TO_WIRE_METRIC.items():
         if sample.get(field_name) is None:

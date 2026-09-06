@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 from uuid import UUID
 
+from normalization.identity import normalize_origin
+
 
 class AggregationScope(StrEnum):
     """What a cumulative value actually covers. Values across scopes are NEVER
@@ -60,6 +62,82 @@ def can_sum(a: AggregationScope, b: AggregationScope) -> bool:
     """Two cumulative values may be added only if they are the same component
     scope. Totals, account aggregates, and reconciled aggregates are terminal."""
     return a is b is AggregationScope.INTERVAL_COMPONENT
+
+
+# ──────────────────────────────────────────────────────────────────
+#  Wire aggregation → canonical scope
+# ──────────────────────────────────────────────────────────────────
+
+#: The literal ``source`` label HealthSave's cumulative extractor stamps on every
+#: HKStatistics bucket (``HealthKitExtractor.fetchDailyStatistics``), and its
+#: normalized key. Both live here rather than in the Apple normalizer because the
+#: v1 projection in ``storage.timescale.measurements`` has to reach the SAME
+#: verdict — two copies of this rule is how ``daily_activity`` and
+#: ``canonical_observations`` ended up disagreeing about what a row means.
+HEALTHKIT_STATISTICS_ORIGIN = "HealthKit Statistics"
+HEALTHKIT_STATISTICS_ORIGIN_KEY = normalize_origin(HEALTHKIT_STATISTICS_ORIGIN)
+
+#: The only two scopes a HealthKit client may assert on the wire. The remaining
+#: ``AggregationScope`` members describe vendor connectors; a client must not be
+#: able to claim them.
+WIRE_AGGREGATION_SCOPES: dict[str, AggregationScope] = {
+    "component": AggregationScope.INTERVAL_COMPONENT,
+    "day_total": AggregationScope.OWNER_ALL_SOURCE_DAY_TOTAL,
+}
+
+
+#: Inverse of :data:`WIRE_AGGREGATION_SCOPES`. The canonical→wire direction is
+#: needed by the v1 projection: it rebuilds writer-shaped samples from
+#: ``canonical_observations`` (whose ``source`` has already been replaced by the
+#: plugin id, so the legacy origin sniff is impossible there) and re-declares the
+#: scope the normalizer already resolved. Scopes with no wire name are vendor
+#: connector concerns and are simply not stamped.
+WIRE_AGGREGATION_BY_SCOPE: dict[AggregationScope, str] = {
+    scope: name for name, scope in WIRE_AGGREGATION_SCOPES.items()
+}
+
+
+class UnknownWireAggregation(ValueError):
+    """A sample declared an ``aggregation`` the wire contract does not define.
+
+    Deterministic and caller-visible on purpose: the ingest route turns this into
+    a 422. Guessing a scope is exactly the ambiguity the v2 wire exists to remove.
+    """
+
+
+def classify_wire_aggregation_scope(
+    *,
+    declared: str | None,
+    has_identity: bool,
+    metric_is_daily_total: bool,
+    origin_key: str,
+) -> AggregationScope:
+    """Resolve one wire sample's aggregation scope.
+
+    Four tiers, most-authoritative first:
+
+    1. ``declared`` — the explicit ``samples[].aggregation`` key (iOS 1.8.0+).
+       An unrecognized value raises :class:`UnknownWireAggregation`; it is never
+       guessed.
+    2. HKSample identity present ⇒ a component. A statistics bucket has no
+       ``uuid`` by construction, so identity is decisive.
+    3. Legacy sniff for clients ≤ 1.7.2, which sent no ``aggregation``: a
+       daily-total metric whose origin is the extractor's literal
+       ``"HealthKit Statistics"`` label. Retained **permanently** — those
+       binaries are in the field and must keep their current semantics.
+    4. Anything else is a component. This is what makes Android's raw Health
+       Connect records (origin ``"Pixel 9"``) classify correctly today.
+    """
+    if declared is not None:
+        try:
+            return WIRE_AGGREGATION_SCOPES[declared]
+        except KeyError as exc:
+            raise UnknownWireAggregation(declared) from exc
+    if has_identity:
+        return AggregationScope.INTERVAL_COMPONENT
+    if metric_is_daily_total and origin_key == HEALTHKIT_STATISTICS_ORIGIN_KEY:
+        return AggregationScope.OWNER_ALL_SOURCE_DAY_TOTAL
+    return AggregationScope.INTERVAL_COMPONENT
 
 
 def _digest(*parts: object) -> str:
