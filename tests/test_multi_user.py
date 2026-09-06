@@ -128,7 +128,12 @@ async def test_ingest_propagates_owner_id_to_daily_activity_quantity_metric():
                 {
                     "date": "2026-04-10T00:00:00Z",
                     "qty": 10000,
-                    "source": "Apple Watch",
+                    # An all-source HealthKit day total — the only thing that
+                    # projects to ``daily_activity``. A sample attributed to a
+                    # named device ("Apple Watch") is ONE source's contribution
+                    # and now correctly lands in ``quantity_samples`` instead;
+                    # see test_cumulative_scope_routing.py.
+                    "source": "HealthKit Statistics",
                 }
             ],
         },

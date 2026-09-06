@@ -21,6 +21,12 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from contracts._base import DEFAULT_OWNER_ID
+from normalization.fusion import (
+    WIRE_AGGREGATION_BY_SCOPE,
+    AggregationScope,
+    classify_wire_aggregation_scope,
+)
+from normalization.identity import normalize_origin
 from normalization.mappers import (
     ACTIVITY_FIELDS,
     DAILY_ACTIVITY_QUANTITY_FIELDS,
@@ -304,7 +310,9 @@ async def _ingest_metric(
     if metric == "activity_summaries":
         return await _ingest_activity(session, device_id, samples, owner_id=owner_id)
     if metric in DAILY_ACTIVITY_QUANTITY_FIELDS:
-        return await _ingest_daily_quantity(session, device_id, metric, samples, owner_id=owner_id)
+        return await _ingest_cumulative_by_scope(
+            session, device_id, metric, samples, owner_id=owner_id
+        )
     if metric == "sleep_analysis":
         return await _ingest_sleep(session, device_id, samples, owner_id=owner_id)
     if metric == "medication_dose_event":
@@ -715,6 +723,63 @@ async def _ingest_activity(
             result = result.with_insert_flag(inserted_new)
 
     return result.with_counts(rejected=rejected_count, deduped_in_batch=dedup_count)
+
+
+async def _ingest_cumulative_by_scope(
+    session: AsyncSession,
+    device_id: int,
+    metric: str,
+    samples: list[dict],
+    *,
+    owner_id: UUID = DEFAULT_OWNER_ID,
+) -> IngestWriteResult:
+    """Split a cumulative batch by aggregation scope before it hits storage.
+
+    ``daily_activity`` holds ONE row per ``(date, device_id, owner_id)`` and its
+    upsert is ``{column} = EXCLUDED.{column}`` — **last write wins, it does not
+    sum**. Routing raw per-sample components there would leave
+    ``active_calories`` equal to the last sample's few kcal and take the Grafana
+    activity dashboard (``deploy/grafana/dashboards/activity.json``) down with it.
+
+    So: all-source day totals project to ``daily_activity``; components go to
+    ``quantity_samples``, which is keyed ``(time, device_id, metric_name,
+    owner_id)`` and preserves every row.
+
+    This also *aligns* the legacy projection with a verdict the canonical
+    normalizer was already reaching. Android's raw Health Connect records
+    (origin ``"Pixel 9"``) have always been written to
+    ``canonical_observations`` as ``interval_component``, while this projection
+    dumped them into ``daily_activity`` anyway — one row per day, last record
+    wins. That divergence is the bug this closes, not a new policy.
+    """
+    day_totals: list[dict] = []
+    components: list[dict] = []
+    for sample in samples:
+        scope = classify_wire_aggregation_scope(
+            declared=sample.get("aggregation"),
+            has_identity=first_present(sample, "uuid", "id", "source_record_uid") is not None,
+            # Membership in DAILY_ACTIVITY_QUANTITY_FIELDS *is* the daily-total
+            # assertion — that is what the table stores.
+            metric_is_daily_total=True,
+            origin_key=normalize_origin(_sample_source(sample)),
+        )
+        if scope is AggregationScope.OWNER_ALL_SOURCE_DAY_TOTAL:
+            day_totals.append(sample)
+        else:
+            components.append(sample)
+
+    result = IngestWriteResult()
+    if day_totals:
+        result = result.combine(
+            await _ingest_daily_quantity(
+                session, device_id, metric, day_totals, owner_id=owner_id
+            )
+        )
+    if components:
+        result = result.combine(
+            await _ingest_generic(session, device_id, metric, components, owner_id=owner_id)
+        )
+    return result
 
 
 async def _ingest_daily_quantity(
@@ -1267,6 +1332,14 @@ def _quantity_sample_from_observation(obs: Observation) -> dict | None:
     source_record_uid = getattr(obs, "source_record_uid", None)
     if source_record_uid:
         row["uuid"] = source_record_uid
+    # Re-declare the aggregation scope the normalizer already resolved. This path
+    # rebuilds the sample from canonical truth, so ``source`` is the plugin id by
+    # now ("apple-health-healthsave") and the legacy "HealthKit Statistics" origin
+    # sniff cannot fire. Without this the projection would misfile every day total
+    # as a component and ``daily_activity`` would stop being populated at all.
+    wire_aggregation = WIRE_AGGREGATION_BY_SCOPE.get(getattr(obs, "aggregation_scope", None))
+    if wire_aggregation:
+        row["aggregation"] = wire_aggregation
     return row
 
 
