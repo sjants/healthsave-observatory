@@ -302,6 +302,7 @@ class TimeSeriesQueryService(Protocol):
         end: datetime,
         limit: int = 5000,
         stream_id: str | None = None,
+        rollup_scope_only: bool = False,
     ) -> list[SeriesPoint]: ...
 
     async def query_fused_series(

@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from contracts.observation import Observation
+from normalization.fusion import preferred_read_scope
 from sqlalchemy import bindparam, text
 
 if TYPE_CHECKING:
@@ -247,6 +248,8 @@ _SERIES_SQL = text(
         AND interval_start < :end
         AND status = 'active'
         AND (CAST(:stream_id AS uuid) IS NULL OR stream_id = CAST(:stream_id AS uuid))
+        AND (CAST(:aggregation_scope AS text) IS NULL
+             OR aggregation_scope = CAST(:aggregation_scope AS text))
       ORDER BY interval_start DESC
       LIMIT :limit
     ) AS recent
@@ -380,11 +383,21 @@ class CanonicalObservationRepository:
         end: datetime,
         limit: int = 5000,
         stream_id: str | None = None,
+        rollup_scope_only: bool = False,
     ) -> list[SeriesPoint]:
         """Read one metric's active series within [start, end).
 
         ``stream_id`` optionally narrows to a single device stream; ``None``
         returns the fused series across all streams (unchanged behavior).
+
+        ``rollup_scope_only`` is for callers about to AGGREGATE the result
+        (mean, sum, count). A metric carrying both an all-source day total and
+        its raw components holds both scales as active rows in the same day, and
+        averaging across them is meaningless — see
+        ``normalization.fusion.can_sum``. Setting this narrows the read to the
+        single scope that metric rolls up over. Transport callers (the v2 series
+        API) leave it False and receive every scope, each row still labelled
+        with its own ``aggregation_scope``.
         """
         result = await session.execute(
             _SERIES_SQL,
@@ -396,6 +409,9 @@ class CanonicalObservationRepository:
                 "end": end,
                 "limit": limit,
                 "stream_id": str(stream_id) if stream_id else None,
+                "aggregation_scope": (
+                    str(preferred_read_scope(metric_id)) if rollup_scope_only else None
+                ),
             },
         )
         return [row_to_series_point(dict(row)) for row in result.mappings().all()]

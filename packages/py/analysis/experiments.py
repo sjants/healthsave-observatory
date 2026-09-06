@@ -163,6 +163,11 @@ class ExperimentRunner:
             start=start,
             end=end,
             limit=_SERIES_LIMIT,
+            # This method takes a daily MEAN below, so it must read a single
+            # aggregation scope. Without this, a cumulative metric carrying both
+            # an all-source day total and its raw components averages ~600 kcal
+            # against ~40 kcal and the resulting effect size is fiction.
+            rollup_scope_only=True,
         )
         values_by_day: dict[date, list[float]] = {}
         for row in rows:

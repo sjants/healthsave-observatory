@@ -140,6 +140,41 @@ def classify_wire_aggregation_scope(
     return AggregationScope.INTERVAL_COMPONENT
 
 
+def daily_total_metric_ids() -> frozenset[str]:
+    """Ontology metric ids whose canonical shape is an all-source daily total.
+
+    Computed from the registry rather than hand-listed so it cannot drift from
+    ``kind="daily_total"``. 64 metrics as of ontology v1.
+    """
+    from contracts.ontology import REGISTRY
+
+    return frozenset(
+        metric_id
+        for metric_id, definition in REGISTRY.items()
+        if definition.aggregation.kind == "daily_total"
+    )
+
+
+def preferred_read_scope(metric_id: str) -> AggregationScope:
+    """Which aggregation scope a ROLLUP over ``metric_id`` must select.
+
+    Rollups (avg / sum / count over a window) are only meaningful within a single
+    scope — see :func:`can_sum`. A daily-total metric that also carries raw
+    components holds BOTH scales as active rows in the same metric/day, so an
+    unfiltered ``avg`` collapses toward the per-sample mean while ``max`` stays the
+    day total and ``count`` inflates by the component fan-out.
+
+    The default preserves today's numbers exactly: daily-total metrics roll up
+    over their all-source totals, everything else over interval components.
+    """
+    from contracts.ontology import REGISTRY
+
+    definition = REGISTRY.get(metric_id)
+    if definition is not None and definition.aggregation.kind == "daily_total":
+        return AggregationScope.OWNER_ALL_SOURCE_DAY_TOTAL
+    return AggregationScope.INTERVAL_COMPONENT
+
+
 def _digest(*parts: object) -> str:
     return hashlib.sha256("\x1f".join(str(p) for p in parts).encode()).hexdigest()
 

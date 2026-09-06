@@ -32,6 +32,11 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from contracts._base import DEFAULT_OWNER_ID, DEFAULT_WORKSPACE_ID
+from normalization.fusion import (
+    AggregationScope,
+    daily_total_metric_ids,
+    preferred_read_scope,
+)
 from sqlalchemy import text
 
 if TYPE_CHECKING:
@@ -528,6 +533,7 @@ async def summarize_metric_window(
               AND interval_start < :end
               AND numeric_value IS NOT NULL
               AND status = 'active'
+              AND aggregation_scope = :aggregation_scope
             """
         ),
         {
@@ -536,6 +542,7 @@ async def summarize_metric_window(
             "metric_id": metric_id,
             "start": start,
             "end": end,
+            "aggregation_scope": str(preferred_read_scope(metric_id)),
         },
     )
     row = result.fetchone()
@@ -587,6 +594,7 @@ async def fetch_metric_daily_series(
               AND interval_start < :end
               AND numeric_value IS NOT NULL
               AND status = 'active'
+              AND aggregation_scope = :aggregation_scope
             GROUP BY day
             ORDER BY day ASC
             """
@@ -599,6 +607,7 @@ async def fetch_metric_daily_series(
             "end": end,
             "time_zone": time_zone,
             "day_boundary_minutes": day_boundary_minutes,
+            "aggregation_scope": str(preferred_read_scope(metric_id)),
         },
     )
     return _fetchall(result)
@@ -636,11 +645,26 @@ async def fetch_canonical_coverage(
             WHERE owner_id = :owner_id
               AND workspace_id = :workspace_id
               AND status = 'active'
+              AND aggregation_scope = CASE
+                    WHEN metric_id = ANY(:daily_total_metric_ids)
+                        THEN :day_total_scope
+                        ELSE :component_scope
+                  END
             GROUP BY metric_id
             ORDER BY metric_id ASC
             """
         ),
-        {"owner_id": str(owner_id), "workspace_id": str(workspace_id)},
+        {
+            "owner_id": str(owner_id),
+            "workspace_id": str(workspace_id),
+            # Coverage must count what the ANALYSIS will actually read, one scope
+            # per metric — otherwise a metric carrying both scales reports an
+            # inflated observation_count and every sufficiency gate reads
+            # "analyzable now" on days that hold a single real value.
+            "daily_total_metric_ids": sorted(daily_total_metric_ids()),
+            "day_total_scope": str(AggregationScope.OWNER_ALL_SOURCE_DAY_TOTAL),
+            "component_scope": str(AggregationScope.INTERVAL_COMPONENT),
+        },
     )
     return [
         {

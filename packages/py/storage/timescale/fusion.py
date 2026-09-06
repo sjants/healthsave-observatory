@@ -161,6 +161,15 @@ _UPDATE_VARIANTS_SQL = text(
      WHERE owner_id = CAST(:owner_id AS UUID)
        AND workspace_id = CAST(:workspace_id AS UUID)
        AND id = ANY(CAST(:variant_ids AS UUID[]))
+       -- Fusion assigns a semantic key across two paths to the SAME physical
+       -- emitter, which is only ever a component-vs-component claim (see the
+       -- candidate query above, which requires interval_component on both
+       -- sides). Without this guard the SET clause would hard-write
+       -- 'interval_component' onto whatever ids it was handed, silently
+       -- demoting an all-source day total into something summable. Safe today
+       -- only because the ids happen to come from the guarded query; this makes
+       -- it safe for any caller.
+       AND aggregation_scope = 'interval_component'
     """
 )
 
