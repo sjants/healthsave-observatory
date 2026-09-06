@@ -37,13 +37,13 @@ CANONICAL = {scope.value for scope in AggregationScope}
 
 
 def test_the_vocabulary_is_the_five_known_scopes():
-    assert CANONICAL == {
+    assert {
         "interval_component",
         "device_day_total",
         "provider_account_day_total",
         "provider_reconciled_day_total",
         "owner_all_source_day_total",
-    }
+    } == CANONICAL
 
 
 def test_contracts_data_literal_matches_the_enum():

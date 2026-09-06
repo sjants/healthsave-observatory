@@ -174,10 +174,10 @@ _INSERT_SQL = text(
         normalizer_version = EXCLUDED.normalizer_version,
         normalization_run_id = EXCLUDED.normalization_run_id,
         status = 'active'
-    WHERE canonical_observations.aggregation_scope = 'owner_all_source_day_total'
-      AND EXCLUDED.aggregation_scope = 'owner_all_source_day_total'
+    WHERE canonical_observations.aggregation_scope = EXCLUDED.aggregation_scope
       AND canonical_observations.normalizer_id = 'apple_health'
       AND EXCLUDED.normalizer_id = 'apple_health'
+      AND canonical_observations.status = 'active'
       AND CASE
             WHEN pg_input_is_valid(
                     COALESCE(EXCLUDED.provenance->>'raw_payload_ref', ''),

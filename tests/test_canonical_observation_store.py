@@ -252,8 +252,22 @@ async def test_insert_many_only_updates_newer_apple_daily_total_corrections() ->
     statement, _params = session.calls[0]
     sql = str(statement)
     assert "ON CONFLICT (owner_id, workspace_id, dedup_key, interval_start) DO UPDATE" in sql
-    assert "canonical_observations.aggregation_scope = 'owner_all_source_day_total'" in sql
-    assert "EXCLUDED.aggregation_scope = 'owner_all_source_day_total'" in sql
+    # The guard requires the two scopes to MATCH EACH OTHER rather than both
+    # being day totals. Same invariant (a day total can never overwrite a
+    # component or vice versa), extended to all five scopes — and it stops
+    # making components immutable. `build_dedup_key` prefers source_record_uid
+    # and ignores the value, so a component re-sent with a corrected qty under
+    # the same HKSample uuid collides; under the old both-must-be-day-total
+    # guard that collision was `DO UPDATE ... WHERE false`, i.e. a silent no-op
+    # that kept the stale value.
+    assert "canonical_observations.aggregation_scope = EXCLUDED.aggregation_scope" in sql
+    assert "'owner_all_source_day_total'" not in sql, (
+        "the guard must not special-case one scope"
+    )
+    # A deletion stays authoritative: re-ingesting a superseded row must not
+    # resurrect it. Only a genuinely new sample (new uuid -> new dedup_key ->
+    # new row) brings data back.
+    assert "canonical_observations.status = 'active'" in sql
     assert "canonical_observations.normalizer_id = 'apple_health'" in sql
     assert "EXCLUDED.normalizer_id = 'apple_health'" in sql
     assert "raw_payload_ref" in sql
@@ -263,6 +277,42 @@ async def test_insert_many_only_updates_newer_apple_daily_total_corrections() ->
     assert "'timestamp with time zone'" in sql
     assert "EXCLUDED.created_at >= canonical_observations.created_at" in sql
     assert "status = 'active'" in sql
+
+
+@pytest.mark.asyncio
+async def test_insert_many_lets_a_component_be_revised_in_place() -> None:
+    """A component re-sent with a corrected value must not be a silent no-op.
+
+    ``build_dedup_key`` prefers ``source_record_uid`` and ignores the value
+    entirely, so a v2 anchored sample re-sent with a corrected ``qty`` under the
+    same HKSample uuid produces the SAME dedup_key and conflicts. While the
+    conflict guard demanded ``owner_all_source_day_total`` on both sides, that
+    conflict resolved to ``DO UPDATE ... WHERE false`` — Postgres performed the
+    resolution, updated nothing, raised nothing, and kept the stale value. That
+    silently broke revision semantics for every uuid-carrying metric: heart
+    rate, HRV, SpO2, body temperature, sleep.
+    """
+    repo = CanonicalObservationRepository()
+    session = _FakeSession()
+    component = _quantity_obs().model_copy(
+        update={
+            "metric_id": "vital.heart_rate",
+            "aggregation_scope": "interval_component",
+            "source_record_uid": "D2C70000-0000-4000-8000-000000000001",
+            "dedup_key": "uuid-derived-key",
+        }
+    )
+
+    await repo.insert_many(session, [component])
+
+    sql = str(session.calls[0][0])
+    # Scope-matched: component-vs-component now resolves through the same
+    # revision-recency ladder day totals already used.
+    assert "canonical_observations.aggregation_scope = EXCLUDED.aggregation_scope" in sql
+    # And the ladder is still what decides the winner, not insert order.
+    assert "raw_payload_ref" in sql
+    assert "captured_at" in sql
+    assert "EXCLUDED.created_at >= canonical_observations.created_at" in sql
 
 
 @pytest.mark.asyncio
