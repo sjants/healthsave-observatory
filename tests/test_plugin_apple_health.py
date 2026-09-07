@@ -340,3 +340,49 @@ async def test_registry_load_path_produces_same_writes_as_direct_path():
         "registry path issued different SQL than the direct path — "
         "Phase 7 will inherit a Schrödinger SDK"
     )
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_device_uses_atomic_upsert():
+    from types import SimpleNamespace
+
+    from sqlalchemy.exc import IntegrityError
+    from storage.timescale.measurements import _get_or_create_device
+
+    class ConcurrentInsertSession:
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, statement, params=None):
+            sql = " ".join(str(statement).split())
+            self.calls.append((sql, params or {}))
+
+            if sql.startswith("SELECT id FROM devices"):
+                return SimpleNamespace(first=lambda: None)
+
+            if sql.startswith("INSERT INTO devices"):
+                if "ON CONFLICT" not in sql:
+                    raise IntegrityError(
+                        sql,
+                        params,
+                        Exception(
+                            "duplicate key value violates unique constraint "
+                            '"devices_device_type_key"'
+                        ),
+                    )
+
+                return SimpleNamespace(scalar=lambda: 42)
+
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    session = ConcurrentInsertSession()
+
+    device_id = await _get_or_create_device(session, "Test Device")
+
+    assert device_id == 42
+    assert len(session.calls) == 1
+    sql, params = session.calls[0]
+    assert "INSERT INTO devices" in sql
+    assert "ON CONFLICT (device_type)" in sql
+    assert "RETURNING id" in sql
+    assert params == {"dt": "Test Device"}

@@ -242,13 +242,13 @@ async def _execute_batch_insert_with_flags(
 
 async def _get_or_create_device(session: AsyncSession, device_type: str) -> int:
     result = await session.execute(
-        text("SELECT id FROM devices WHERE device_type = :dt"), {"dt": device_type}
-    )
-    row = result.first()
-    if row:
-        return row[0]
-    result = await session.execute(
-        text("INSERT INTO devices (device_type) VALUES (:dt) RETURNING id"),
+        text("""
+            INSERT INTO devices (device_type)
+            VALUES (:dt)
+            ON CONFLICT (device_type) DO UPDATE
+            SET device_type = EXCLUDED.device_type
+            RETURNING id
+        """),
         {"dt": device_type},
     )
     return result.scalar()
