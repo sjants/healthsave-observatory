@@ -318,6 +318,51 @@ async def _ingest_metric(
     return await _ingest_generic(session, device_id, metric, samples, owner_id=owner_id)
 
 
+async def _promote_legacy_source_uuids(
+    session: AsyncSession,
+    table: str,
+    rows: list[dict],
+) -> None:
+    """Attach incoming UUID identity to matching active legacy rows.
+
+    Rows written before source_uuid support may already occupy the legacy
+    (time, device_id, owner_id) unique slot. Promote those rows before the
+    UUID-aware upsert so retries can adopt the existing measurement instead
+    of colliding with the legacy unique index.
+    """
+    if not rows:
+        return
+
+    values = []
+    params = {}
+    for index, row in enumerate(rows):
+        values.append(
+            f"(CAST(:time_{index} AS TIMESTAMPTZ), CAST(:device_id_{index} AS INTEGER), "
+            f"CAST(:owner_id_{index} AS UUID), CAST(:source_uuid_{index} AS UUID))"
+        )
+        params[f"time_{index}"] = row["time"]
+        params[f"device_id_{index}"] = row["device_id"]
+        params[f"owner_id_{index}"] = row["owner_id"]
+        params[f"source_uuid_{index}"] = row["source_uuid"]
+
+    await session.execute(
+        text(
+            f"""
+            UPDATE {table} AS existing
+               SET source_uuid = incoming.source_uuid
+              FROM (VALUES {", ".join(values)})
+                   AS incoming(time, device_id, owner_id, source_uuid)
+             WHERE existing.time = incoming.time
+               AND existing.device_id = incoming.device_id
+               AND existing.owner_id = incoming.owner_id
+               AND existing.status = 'active'
+               AND existing.source_uuid IS NULL
+            """
+        ),
+        params,
+    )
+
+
 async def _ingest_dedicated(
     session: AsyncSession,
     device_id: int,
@@ -384,6 +429,9 @@ async def _ingest_dedicated(
             identity_rows, ["owner_id", "source_uuid", "time"], metric
         )
         dedup_count += dedup_id
+
+        await _promote_legacy_source_uuids(session, spec["table"], rows_id)
+
         columns = list(rows_id[0].keys())
         update_set = ", ".join(
             f"{c} = EXCLUDED.{c}"
