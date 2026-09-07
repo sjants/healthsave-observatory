@@ -1,13 +1,14 @@
 """HealthSave iOS-load-bearing v2 surface.
 
-The HealthSave iOS app (App Store ID 6759843047) hardcodes two /api/v2
+The HealthSave iOS app (App Store ID 6759843047) hardcodes three /api/v2
 routes in ``Config.swift`` — it does NOT discover them from
 ``/api/v2/setup/diagnostics``:
 
-    GET /api/v2/sync/runs/latest          (Config.latestSyncRunEndpoint)
-    GET /api/v2/sync/runs/{sync_run_id}   (Config.syncRunEndpoint)
+    GET /api/v2/sync/runs/latest                  (Config.latestSyncRunEndpoint)
+    GET /api/v2/sync/runs/{sync_run_id}           (Config.syncRunEndpoint)
+    PUT /api/v2/sync/runs/{sync_run_id}/summary   (Config.syncRunSummaryEndpoint, 1.8.0+)
 
-v2 is "free to evolve" by doctrine, but these two routes carry v1-grade
+v2 is "free to evolve" by doctrine, but these routes carry v1-grade
 freeze semantics: reshaping or removing them breaks the live App Store
 binary's destination receipts immediately. Any failure here is an
 iOS-app-breaking change and requires a coordinated App Store release,
@@ -38,6 +39,18 @@ IOS_V2_ROUTES: frozenset[str] = frozenset(
     {
         "GET /api/v2/sync/runs/latest",
         "GET /api/v2/sync/runs/{sync_run_id}",
+        "PUT /api/v2/sync/runs/{sync_run_id}/summary",
+    }
+)
+
+# Keys iOS's DestinationRunSummaryPublisher.decodeAck reads from the PUT
+# summary acknowledgement. Emitted by sync_receipts.record_sync_run_summary.
+IOS_RUN_SUMMARY_ACK_KEYS: frozenset[str] = frozenset(
+    {
+        "status",
+        "sync_run_id",
+        "recorded",
+        "received_at",
     }
 )
 
@@ -146,6 +159,33 @@ def test_latest_sync_run_emits_ios_decoder_keys() -> None:
     assert not missing, (
         f"storage.timescale.sync_receipts.latest_sync_run no longer emits "
         f"{sorted(missing)}. {_BREAK_MESSAGE}"
+    )
+
+
+def test_record_sync_run_summary_emits_ios_ack_keys() -> None:
+    """The PUT acknowledgement must keep emitting every key iOS decodes."""
+    source = inspect.getsource(sync_receipts.record_sync_run_summary)
+    missing = IOS_RUN_SUMMARY_ACK_KEYS - _emitted_keys(source)
+    assert not missing, (
+        f"storage.timescale.sync_receipts.record_sync_run_summary no longer emits "
+        f"{sorted(missing)}. {_BREAK_MESSAGE}"
+    )
+
+
+def test_zero_delivery_run_is_not_the_empty_sentinel() -> None:
+    """A run known only from its closing summary must answer ``status: ok``.
+
+    iOS treats ``status: empty`` as "nothing known about this run yet" and
+    keeps waiting. A run that checked everything and sent nothing IS known —
+    reporting it as empty is what made a 10-minute auto-sync look, from the
+    server, like an app that stopped hours ago.
+    """
+    source = inspect.getsource(sync_receipts.sync_run)
+    assert "RUN_SUMMARY_VERIFICATION_LEVEL" in source
+    latest = inspect.getsource(sync_receipts.latest_sync_run)
+    assert "_latest_run_summary" in latest, (
+        "latest_sync_run must consult healthsave_sync_run_summaries — otherwise a "
+        "zero-delivery run can never become the latest run"
     )
 
 

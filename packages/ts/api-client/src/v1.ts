@@ -1149,6 +1149,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/sync/runs/{sync_run_id}/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Sync Run Summary
+         * @description Record (or replace) the client's closing summary for one sync run.
+         *
+         *     Optional for third-party servers, like every ``/api/v2/sync/*`` route: a
+         *     client treats 404/405 here as "not supported" and carries on. When present,
+         *     it is what lets ``GET /api/v2/sync/runs/latest`` report a run that sent
+         *     nothing as the latest run instead of silently repeating the previous one.
+         */
+        put: operations["put_sync_run_summary_api_v2_sync_runs__sync_run_id__summary_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -1801,6 +1826,61 @@ export interface components {
             streams: components["schemas"]["StreamView"][];
             /** Total */
             total?: number | null;
+        };
+        /**
+         * SyncRunSummaryPayload
+         * @description What a HealthSave client says about a run it just closed.
+         *
+         *     Receipts are written per HTTP batch, so a run that had nothing to send left
+         *     no trace on the server and ``GET /api/v2/sync/runs/latest`` kept answering
+         *     with the previous run. This body is the run's existence proof: one small
+         *     PUT per completed run, idempotent on the run id. It carries counts and
+         *     metric NAMES only — never a health value.
+         *
+         *     ``extra='allow'`` keeps the shape forward-compatible (a newer client may add
+         *     keys an older server ignores); the enumerated fields are validated
+         *     deterministically and a bad value is a 422, never a 500.
+         */
+        SyncRunSummaryPayload: {
+            /** Client App Version */
+            client_app_version?: string | null;
+            /** Client Platform */
+            client_platform?: string | null;
+            /** Completed At */
+            completed_at?: string | null;
+            /**
+             * Delivery
+             * @enum {string}
+             */
+            delivery: "none" | "foreground" | "background_queued";
+            /** Error Class */
+            error_class?: string | null;
+            /** Intent */
+            intent?: ("latest_changes" | "backfill" | "date_range") | null;
+            /** Metrics Checked */
+            metrics_checked?: string[];
+            /** Metrics With Changes */
+            metrics_with_changes?: string[];
+            /**
+             * Outcome
+             * @enum {string}
+             */
+            outcome: "completed" | "failed";
+            /** Records Sent */
+            records_sent: number;
+            /**
+             * Schema Version
+             * @default 1
+             * @constant
+             * @enum {integer}
+             */
+            schema_version: 1;
+            /** Started At */
+            started_at?: string | null;
+            /** Trigger */
+            trigger?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /** TestConnectionRequest */
         TestConnectionRequest: {
@@ -3775,6 +3855,43 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_sync_run_summary_api_v2_sync_runs__sync_run_id__summary_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string;
+            };
+            path: {
+                sync_run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SyncRunSummaryPayload"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

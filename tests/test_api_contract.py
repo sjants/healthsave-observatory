@@ -2817,3 +2817,223 @@ def test_assert_lifespan_state_raises_when_attr_missing():
 
     with pytest.raises(RuntimeError, match=r"session_factory"):
         _assert_lifespan_state(fake_app)
+
+
+# ─── Sync run summaries (migration 026): a run that sent nothing still exists ──
+
+
+_SUMMARY_ROW_ZERO = {
+    "sync_run_id": "run-zero",
+    "client_platform": "ios",
+    "client_app_version": "1.8.0",
+    "trigger": "observer",
+    "intent": "latest_changes",
+    "outcome": "completed",
+    "delivery": "none",
+    "records_sent": 0,
+    "metrics_checked": ["dietary_water", "heart_rate", "step_count"],
+    "metrics_with_changes": [],
+    "error_class": None,
+    "client_started_at": "2026-05-24T09:00:00Z",
+    "client_completed_at": "2026-05-24T09:00:04Z",
+    "received_at": "2026-05-24T09:00:05Z",
+    "updated_at": "2026-05-24T09:00:05Z",
+}
+
+
+class _SummaryAwareSession(LatestSyncRunSession):
+    """LatestSyncRunSession (receipt run ``run-latest`` closed 07:13:22) plus a
+    configurable healthsave_sync_run_summaries table."""
+
+    def __init__(self, summary_rows: list[dict] | None = None, receipts: bool = True):
+        super().__init__()
+        self.summary_rows = summary_rows or []
+        self.receipts = receipts
+
+    async def execute(self, statement, params=None):
+        sql = " ".join(str(statement).split())
+        if "FROM healthsave_sync_run_summaries" in sql:
+            self.calls.append((sql, params or {}))
+            if "WHERE sync_run_id = :sync_run_id" in sql:
+                wanted = (params or {}).get("sync_run_id")
+                row = next((r for r in self.summary_rows if r["sync_run_id"] == wanted), None)
+                return FakeResult(row=row)
+            return FakeResult(row=self.summary_rows[0] if self.summary_rows else None)
+        if sql.startswith("INSERT INTO healthsave_sync_run_summaries"):
+            self.calls.append((sql, params or {}))
+            return FakeResult(
+                row={"received_at": "2026-05-24T09:00:05Z", "updated_at": "2026-05-24T09:00:05Z"}
+            )
+        if not self.receipts and "healthsave_sync_receipts" in sql:
+            self.calls.append((sql, params or {}))
+            return FakeResult()
+        return await super().execute(statement, params)
+
+
+@pytest.mark.asyncio
+async def test_latest_sync_run_prefers_a_newer_zero_delivery_run_over_older_receipts():
+    """The run that checked everything at 09:00 and sent nothing IS the latest
+    run — not the 07:13 run that happened to deliver batches."""
+    from storage.timescale import sync_receipts
+
+    result = await sync_receipts.latest_sync_run(_SummaryAwareSession([_SUMMARY_ROW_ZERO]))
+
+    assert result["status"] == "ok"
+    assert result["sync_run_id"] == "run-zero"
+    assert result["evidence"] == "run_summary"
+    assert result["batches_seen"] == 0
+    assert result["records_accepted"] == 0
+    assert result["records_inserted_new"] == 0
+    assert result["records_deduped_existing"] == 0
+    assert result["storage_result_level"] == "inserted_vs_existing"
+    assert result["metrics"] == []
+    assert result["latest_sample_time"] is None
+    # Server-stamped close, never the client clock.
+    assert result["completed_at"] == "2026-05-24T09:00:05Z"
+    assert result["run_summary"]["metrics_checked"] == ["dietary_water", "heart_rate", "step_count"]
+    assert result["run_summary"]["delivery"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_latest_sync_run_keeps_the_receipt_run_when_its_summary_is_older():
+    from storage.timescale import sync_receipts
+
+    older = {**_SUMMARY_ROW_ZERO, "sync_run_id": "run-older", "received_at": "2026-05-24T06:00:00Z"}
+    result = await sync_receipts.latest_sync_run(_SummaryAwareSession([older]))
+
+    assert result["sync_run_id"] == "run-latest"
+    assert result["evidence"] == "delivery_receipts"
+    assert result["records_accepted"] == 488
+    assert result["run_summary"] is None
+
+
+@pytest.mark.asyncio
+async def test_latest_sync_run_merges_receipts_and_summary_for_the_same_run():
+    from storage.timescale import sync_receipts
+
+    same = {
+        **_SUMMARY_ROW_ZERO,
+        "sync_run_id": "run-latest",
+        "delivery": "foreground",
+        "records_sent": 512,
+        "metrics_with_changes": ["heart_rate"],
+        "received_at": "2026-05-24T07:13:30Z",
+    }
+    result = await sync_receipts.latest_sync_run(_SummaryAwareSession([same]))
+
+    assert result["sync_run_id"] == "run-latest"
+    assert result["evidence"] == "delivery_receipts+run_summary"
+    assert result["records_accepted"] == 488, "receipt totals stay authoritative"
+    assert result["run_summary"]["records_sent"] == 512
+    assert result["run_summary"]["metrics_with_changes"] == ["heart_rate"]
+
+
+@pytest.mark.asyncio
+async def test_latest_sync_run_is_unchanged_without_any_summary_rows():
+    """Pre-026 databases and servers nobody has PUT to: byte-for-byte the old answer
+    plus the two additive keys."""
+    from storage.timescale import sync_receipts
+
+    result = await sync_receipts.latest_sync_run(_SummaryAwareSession([]))
+
+    assert result["sync_run_id"] == "run-latest"
+    assert result["evidence"] == "delivery_receipts"
+    assert result["run_summary"] is None
+
+
+@pytest.mark.asyncio
+async def test_latest_sync_run_reports_empty_only_when_neither_table_has_a_run():
+    from storage.timescale import sync_receipts
+
+    result = await sync_receipts.latest_sync_run(_SummaryAwareSession([], receipts=False))
+
+    assert result["status"] == "empty"
+
+
+@pytest.mark.asyncio
+async def test_sync_run_by_id_reports_a_zero_delivery_run_as_complete_not_empty():
+    """iOS treats ``status: empty`` as "no receipt yet" and keeps waiting; a run
+    the client closed with nothing to send is complete and must say so."""
+    from storage.timescale import sync_receipts
+
+    result = await sync_receipts.sync_run(
+        _SummaryAwareSession([_SUMMARY_ROW_ZERO], receipts=False), "run-zero"
+    )
+
+    assert result["status"] == "ok"
+    assert result["verification_level"] == "run_summary"
+    assert result["evidence"] == "run_summary"
+    assert result["summary"]["batches_seen"] == 0
+    assert result["summary"]["records_accepted"] == 0
+    assert result["per_metric"] == {}
+    assert result["completed_at"] == "2026-05-24T09:00:05Z"
+    assert result["run_summary"]["outcome"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_sync_run_by_id_stays_empty_for_a_run_nobody_has_heard_of():
+    from storage.timescale import sync_receipts
+
+    result = await sync_receipts.sync_run(_SummaryAwareSession([], receipts=False), "run-ghost")
+
+    assert result["status"] == "empty"
+
+
+@pytest.mark.asyncio
+async def test_sync_run_by_id_attaches_the_summary_to_a_receipt_run():
+    from storage.timescale import sync_receipts
+
+    same = {**_SUMMARY_ROW_ZERO, "sync_run_id": "run-abc", "delivery": "foreground"}
+
+    class _Both(SpecificSyncRunSession):
+        async def execute(self, statement, params=None):
+            sql = " ".join(str(statement).split())
+            if "FROM healthsave_sync_run_summaries" in sql:
+                return FakeResult(row=same)
+            return await super().execute(statement, params)
+
+    result = await sync_receipts.sync_run(_Both(), "run-abc")
+
+    assert result["verification_level"] == "delivery_receipt"
+    assert result["evidence"] == "delivery_receipts+run_summary"
+    assert result["summary"]["batches_seen"] == 3
+    assert result["run_summary"]["delivery"] == "foreground"
+
+
+@pytest.mark.asyncio
+async def test_record_sync_run_summary_binds_sorted_unique_metric_names_and_parses_client_times():
+    from storage.timescale import sync_receipts
+
+    session = _SummaryAwareSession()
+    ack = await sync_receipts.record_sync_run_summary(
+        session,
+        owner_id=UUID("00000000-0000-0000-0000-000000000001"),
+        sync_run_id="run-zero",
+        outcome="completed",
+        delivery="none",
+        records_sent=0,
+        metrics_checked=["step_count", "heart_rate", "step_count"],
+        metrics_with_changes=[],
+        trigger="observer",
+        intent="latest_changes",
+        error_class=None,
+        client_platform="ios",
+        client_app_version="1.8.0",
+        client_started_at="2026-05-24T09:00:00.000Z",
+        client_completed_at="2026-05-24T09:00:04.000Z",
+    )
+
+    sql, params = next(
+        c for c in session.calls if c[0].startswith("INSERT INTO healthsave_sync_run_summaries")
+    )
+    assert "ON CONFLICT (sync_run_id) DO UPDATE" in sql, "the PUT must be idempotent"
+    assert params["metrics_checked"] == ["heart_rate", "step_count"]
+    assert params["metrics_with_changes"] == []
+    started = params["client_started_at"]
+    assert started is not None and not isinstance(started, str), (
+        "TIMESTAMPTZ columns need datetimes, not ISO strings (asyncpg refuses strings → 500)"
+    )
+    assert ack["status"] == "ok"
+    assert ack["sync_run_id"] == "run-zero"
+    assert ack["recorded"] is True
+    assert ack["received_at"] == "2026-05-24T09:00:05Z"

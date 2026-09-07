@@ -320,6 +320,7 @@ The "honest accounting" surface: how much the app sent vs what was accepted/inse
 - `GET /api/v2/sync/coverage` — per-metric received/accepted/inserted/deduped + destination row counts.
 - `GET /api/v2/sync/runs/latest` — the most recent sync run summary.
 - `GET /api/v2/sync/runs/{sync_run_id}` — one run, with per-metric breakdown + verification level.
+- `PUT /api/v2/sync/runs/{sync_run_id}/summary` — the client's closing summary for a run (iOS 1.8.0+; counts + metric names only, never values). This is what lets a run that had NOTHING to send still become `runs/latest` instead of the server repeating the previous run; `runs/latest` and `runs/{id}` answer with `evidence: delivery_receipts | run_summary | delivery_receipts+run_summary` and a `run_summary` object. Optional for third-party servers — the app treats 404/405 as unsupported.
 - `GET /api/v2/sync/anomalies` — overlapping/concurrent-run detection.
 
 ```json
@@ -331,6 +332,14 @@ The "honest accounting" surface: how much the app sent vs what was accepted/inse
   "metrics": ["vital.heart_rate", "vital.hrv"],
   "sample_window": { "min_sample_time": "...", "max_sample_time": "..." },
   "latest_sample_time": "2026-06-08T20:17:39Z" }
+```
+```json
+// PUT /api/v2/sync/runs/{sync_run_id}/summary  →  { "status": "ok", "sync_run_id": "…", "recorded": true, "received_at": "…", "updated_at": "…" }
+{ "schema_version": 1, "outcome": "completed", "delivery": "none", "records_sent": 0,
+  "metrics_checked": ["heart_rate", "sleep_analysis", "step_count"], "metrics_with_changes": [],
+  "trigger": "observer", "intent": "latest_changes",
+  "client_platform": "ios", "client_app_version": "1.8.0",
+  "started_at": "2026-01-01T06:20:00.000Z", "completed_at": "2026-01-01T06:20:04.000Z" }
 ```
 ```json
 // GET /api/v2/sync/coverage  (summary + per-metric[])

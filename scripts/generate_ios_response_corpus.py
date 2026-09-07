@@ -51,6 +51,10 @@ OUT_DIR = REPO_ROOT / "tests" / "fixtures" / "apple_healthsave_responses"
 
 # Fixed wire identifiers so receipt echoes are reproducible.
 CORPUS_SYNC_RUN_ID = "corpus-run-001"
+# A second run that checked everything and sent NOTHING — known to the server
+# only through its closing summary (PUT /api/v2/sync/runs/{id}/summary).
+CORPUS_ZERO_DELIVERY_RUN_ID = "corpus-run-002"
+CORPUS_SUMMARY_RECEIVED_AT = "2026-01-01T06:20:05+00:00"
 CORPUS_SAMPLE_MIN = "2026-01-01T00:00:00.000Z"
 CORPUS_SAMPLE_MAX = "2026-01-01T06:00:00.000Z"
 
@@ -92,13 +96,30 @@ class CorpusSession:
         receipt_hash_row: dict[str, Any] | None = None,
         latest_run_rows: list[dict[str, Any]] | None = None,
         run_metric_rows: list[dict[str, Any]] | None = None,
+        run_summary_rows: list[dict[str, Any]] | None = None,
     ):
         self.receipt_hash_row = receipt_hash_row
         self.latest_run_rows = latest_run_rows or []
         self.run_metric_rows = run_metric_rows or []
+        # healthsave_sync_run_summaries (migration 026): the client's closing
+        # summary per run. Empty ⇒ pre-026 / no client has PUT one yet.
+        self.run_summary_rows = run_summary_rows or []
 
     async def execute(self, statement, params=None):
         sql = " ".join(str(statement).split())
+        if sql.startswith("INSERT INTO healthsave_sync_run_summaries"):
+            return _FakeResult(
+                row={
+                    "received_at": CORPUS_SUMMARY_RECEIVED_AT,
+                    "updated_at": CORPUS_SUMMARY_RECEIVED_AT,
+                }
+            )
+        if "FROM healthsave_sync_run_summaries" in sql:
+            if "WHERE sync_run_id = :sync_run_id" in sql:
+                wanted = (params or {}).get("sync_run_id")
+                row = next((r for r in self.run_summary_rows if r["sync_run_id"] == wanted), None)
+                return _FakeResult(row=row)
+            return _FakeResult(row=self.run_summary_rows[0] if self.run_summary_rows else None)
         if (
             "INSERT INTO healthsave_sync_receipts" in sql
             and "'processing'" in sql
@@ -229,6 +250,43 @@ _RUN_METRIC_ROWS = [
 ]
 
 
+# The zero-delivery run's closing summary, keyed by the SQL columns of
+# healthsave_sync_run_summaries (migration 026).
+_ZERO_DELIVERY_SUMMARY_ROW = {
+    "sync_run_id": CORPUS_ZERO_DELIVERY_RUN_ID,
+    "client_platform": "ios",
+    "client_app_version": "1.8.0",
+    "trigger": "observer",
+    "intent": "latest_changes",
+    "outcome": "completed",
+    "delivery": "none",
+    "records_sent": 0,
+    "metrics_checked": ["heart_rate", "sleep_analysis", "step_count"],
+    "metrics_with_changes": [],
+    "error_class": None,
+    "client_started_at": "2026-01-01T06:20:00+00:00",
+    "client_completed_at": "2026-01-01T06:20:04+00:00",
+    "received_at": CORPUS_SUMMARY_RECEIVED_AT,
+    "updated_at": CORPUS_SUMMARY_RECEIVED_AT,
+}
+
+# What the iOS app PUTs when it closes that run (DestinationRunSummarySink).
+_ZERO_DELIVERY_SUMMARY_BODY = {
+    "schema_version": 1,
+    "outcome": "completed",
+    "delivery": "none",
+    "records_sent": 0,
+    "metrics_checked": ["heart_rate", "sleep_analysis", "step_count"],
+    "metrics_with_changes": [],
+    "trigger": "observer",
+    "intent": "latest_changes",
+    "client_platform": "ios",
+    "client_app_version": "1.8.0",
+    "started_at": "2026-01-01T06:20:00.000Z",
+    "completed_at": "2026-01-01T06:20:04.000Z",
+}
+
+
 def _scrub(value: Any) -> Any:
     """Drop pydantic's version-volatile ``url`` key from error bodies."""
     if isinstance(value, dict):
@@ -274,7 +332,12 @@ async def _generate() -> dict[str, dict[str, Any]]:
     from server.api.health_routes import api_health
     from server.api.ingest import apple_batch
     from server.api.status import apple_status
-    from server.api.sync import latest_sync_run, sync_run
+    from server.api.sync import (
+        SyncRunSummaryPayload,
+        latest_sync_run,
+        put_sync_run_summary,
+        sync_run,
+    )
 
     fixtures: dict[str, dict[str, Any]] = {}
 
@@ -366,6 +429,41 @@ async def _generate() -> dict[str, dict[str, Any]]:
         "/api/v2/sync/runs/corpus-run-missing",
         "GET",
         sync_run("corpus-run-missing", CorpusSession()),
+    )
+
+    # PUT /api/v2/sync/runs/{sync_run_id}/summary — the client closes a run that
+    # sent nothing. The ack is what DestinationRunSummarySink decodes.
+    fixtures["sync_run_summary_put.json"] = await _call(
+        f"/api/v2/sync/runs/{CORPUS_ZERO_DELIVERY_RUN_ID}/summary",
+        "PUT",
+        put_sync_run_summary(
+            CORPUS_ZERO_DELIVERY_RUN_ID,
+            SyncRunSummaryPayload.model_validate(_ZERO_DELIVERY_SUMMARY_BODY),
+            CorpusRequest(),
+            CorpusSession(),
+        ),
+    )
+
+    # GET /api/v2/sync/runs/latest — the newest run delivered nothing: it is
+    # known only from its closing summary, and it MUST still be the latest run
+    # (not the previous run that happened to send batches).
+    zero_delivery = CorpusSession(
+        latest_run_rows=[_LATEST_RUN_ROW],
+        run_summary_rows=[_ZERO_DELIVERY_SUMMARY_ROW],
+    )
+    fixtures["sync_run_latest_zero_delivery.json"] = await _call(
+        "/api/v2/sync/runs/latest", "GET", latest_sync_run(zero_delivery)
+    )
+
+    # GET /api/v2/sync/runs/{sync_run_id} — same run by id: complete, not
+    # "empty" (iOS treats the empty sentinel as "no receipt yet").
+    fixtures["sync_run_by_id_zero_delivery.json"] = await _call(
+        f"/api/v2/sync/runs/{CORPUS_ZERO_DELIVERY_RUN_ID}",
+        "GET",
+        sync_run(
+            CORPUS_ZERO_DELIVERY_RUN_ID,
+            CorpusSession(run_summary_rows=[_ZERO_DELIVERY_SUMMARY_ROW]),
+        ),
     )
 
     return fixtures

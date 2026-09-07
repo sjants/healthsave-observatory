@@ -5,6 +5,7 @@
     "batches_processed": 3,
     "batches_seen": 3,
     "completed_at": "2026-01-01T06:05:00+00:00",
+    "evidence": "delivery_receipts",
     "latest_sample_time": "2026-01-01T05:59:00+00:00",
     "metrics": [
       "heart_rate",
@@ -16,6 +17,7 @@
     "records_inserted_new": 100,
     "records_received": 120,
     "records_skipped": 2,
+    "run_summary": null,
     "sample_max_at": "2026-01-01T05:59:00+00:00",
     "sample_min_at": "2026-01-01T00:00:00+00:00",
     "sample_window": {

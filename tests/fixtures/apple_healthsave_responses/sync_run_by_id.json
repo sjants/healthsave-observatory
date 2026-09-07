@@ -1,6 +1,7 @@
 {
   "body": {
     "completed_at": "2026-01-01T06:05:00+00:00",
+    "evidence": "delivery_receipts",
     "per_metric": {
       "heart_rate": {
         "accepted": 79,
@@ -37,6 +38,7 @@
         "storage_result_level": "inserted_vs_existing"
       }
     },
+    "run_summary": null,
     "started_at": "2026-01-01T06:00:00+00:00",
     "status": "ok",
     "summary": {

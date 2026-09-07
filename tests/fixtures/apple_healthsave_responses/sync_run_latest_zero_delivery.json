@@ -1,0 +1,50 @@
+{
+  "body": {
+    "batches_empty": 0,
+    "batches_failed": 0,
+    "batches_processed": 0,
+    "batches_seen": 0,
+    "completed_at": "2026-01-01T06:20:05+00:00",
+    "evidence": "run_summary",
+    "latest_sample_time": null,
+    "metrics": [],
+    "records_accepted": 0,
+    "records_deduped_existing": 0,
+    "records_inserted_new": 0,
+    "records_received": 0,
+    "records_skipped": 0,
+    "run_summary": {
+      "client_app_version": "1.8.0",
+      "client_completed_at": "2026-01-01T06:20:04+00:00",
+      "client_platform": "ios",
+      "client_started_at": "2026-01-01T06:20:00+00:00",
+      "delivery": "none",
+      "error_class": null,
+      "intent": "latest_changes",
+      "metrics_checked": [
+        "heart_rate",
+        "sleep_analysis",
+        "step_count"
+      ],
+      "metrics_with_changes": [],
+      "outcome": "completed",
+      "received_at": "2026-01-01T06:20:05+00:00",
+      "records_sent": 0,
+      "sync_run_id": "corpus-run-002",
+      "trigger": "observer"
+    },
+    "sample_max_at": null,
+    "sample_min_at": null,
+    "sample_window": {
+      "max_sample_time": null,
+      "min_sample_time": null
+    },
+    "started_at": "2026-01-01T06:20:00+00:00",
+    "status": "ok",
+    "storage_result_level": "inserted_vs_existing",
+    "sync_run_id": "corpus-run-002"
+  },
+  "endpoint": "/api/v2/sync/runs/latest",
+  "method": "GET",
+  "status": 200
+}

@@ -1,0 +1,12 @@
+{
+  "body": {
+    "received_at": "2026-01-01T06:20:05+00:00",
+    "recorded": true,
+    "status": "ok",
+    "sync_run_id": "corpus-run-002",
+    "updated_at": "2026-01-01T06:20:05+00:00"
+  },
+  "endpoint": "/api/v2/sync/runs/corpus-run-002/summary",
+  "method": "PUT",
+  "status": 200
+}

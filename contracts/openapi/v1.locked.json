@@ -1730,6 +1730,154 @@
         "title": "StreamsResponse",
         "type": "object"
       },
+      "SyncRunSummaryPayload": {
+        "additionalProperties": true,
+        "description": "What a HealthSave client says about a run it just closed.\n\nReceipts are written per HTTP batch, so a run that had nothing to send left\nno trace on the server and ``GET /api/v2/sync/runs/latest`` kept answering\nwith the previous run. This body is the run's existence proof: one small\nPUT per completed run, idempotent on the run id. It carries counts and\nmetric NAMES only \u2014 never a health value.\n\n``extra='allow'`` keeps the shape forward-compatible (a newer client may add\nkeys an older server ignores); the enumerated fields are validated\ndeterministically and a bad value is a 422, never a 500.",
+        "properties": {
+          "client_app_version": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client App Version"
+          },
+          "client_platform": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Platform"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "delivery": {
+            "enum": [
+              "none",
+              "foreground",
+              "background_queued"
+            ],
+            "title": "Delivery",
+            "type": "string"
+          },
+          "error_class": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Class"
+          },
+          "intent": {
+            "anyOf": [
+              {
+                "enum": [
+                  "latest_changes",
+                  "backfill",
+                  "date_range"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent"
+          },
+          "metrics_checked": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 4096,
+            "title": "Metrics Checked",
+            "type": "array"
+          },
+          "metrics_with_changes": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 4096,
+            "title": "Metrics With Changes",
+            "type": "array"
+          },
+          "outcome": {
+            "enum": [
+              "completed",
+              "failed"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "records_sent": {
+            "minimum": 0.0,
+            "title": "Records Sent",
+            "type": "integer"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "enum": [
+              1
+            ],
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          }
+        },
+        "required": [
+          "outcome",
+          "delivery",
+          "records_sent"
+        ],
+        "title": "SyncRunSummaryPayload",
+        "type": "object"
+      },
       "TestConnectionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -5113,6 +5261,67 @@
           }
         },
         "summary": "Sync Run"
+      }
+    },
+    "/api/v2/sync/runs/{sync_run_id}/summary": {
+      "put": {
+        "description": "Record (or replace) the client's closing summary for one sync run.\n\nOptional for third-party servers, like every ``/api/v2/sync/*`` route: a\nclient treats 404/405 here as \"not supported\" and carries on. When present,\nit is what lets ``GET /api/v2/sync/runs/latest`` report a run that sent\nnothing as the latest run instead of silently repeating the previous one.",
+        "operationId": "put_sync_run_summary_api_v2_sync_runs__sync_run_id__summary_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sync_run_id",
+            "required": true,
+            "schema": {
+              "title": "Sync Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Api-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncRunSummaryPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Put Sync Run Summary Api V2 Sync Runs  Sync Run Id  Summary Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Sync Run Summary"
       }
     },
     "/health": {

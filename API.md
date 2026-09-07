@@ -433,8 +433,19 @@ Data Hub also implements `GET /api/v2/sync/runs/latest` and
 HealthSave uses those only when present, so third-party servers can start with
 the core contract and add receipt proof later. The iOS app reads run-specific
 receipts via `GET /api/v2/sync/runs/{sync_run_id}` to light up its
-"delivery receipt" confidence tier; a v1-only server still syncs cleanly and
-simply doesn't unlock that tier.
+"delivery receipt" confidence tier, and (1.8.0+) closes every completed run
+with `PUT /api/v2/sync/runs/{sync_run_id}/summary`; a v1-only server still
+syncs cleanly and simply doesn't unlock that tier. A 404/405 on any
+`/api/v2/sync/*` route is treated as "not supported", never as a failure.
+
+**Known caveat for iOS ≤ 1.7.2.** Those builds' confirm stage leaned on the
+receipt routes more than this section promised: against a server that served
+the batch endpoint plus status and coverage but not `runs/latest` /
+`runs/{id}`, a run where every metric had nothing new to send ended as
+"needs retry" and cleared the moment the receipt routes answered. 1.8.0
+fixes the client (a run whose every metric settled with nothing to send is
+complete by construction). If you support 1.7.x users on a receipt-less
+server, expect that label on no-op runs; the data was never at risk.
 
 ### iOS liveness probe behavior (1.5+)
 
@@ -518,6 +529,24 @@ Protected by `x-api-key` when `API_KEY` is set. Returns the latest observed
 HealthSave sync run with batch counts, accepted / rejected / in-batch-deduped
 record counts, and metric names.
 
+"Observed" means the server either received batches for the run (delivery
+receipts) **or** the client closed it with a run summary (below). Before the
+summary route existed, a run that checked every metric and found nothing new
+left no trace, so this endpoint kept answering with the *previous* run for as
+long as that stayed true — an app syncing every 10 minutes looked, from the
+Observatory, like it had stopped hours ago. Now the newest evidence of either
+kind wins (judged by server-stamped time; client clocks never participate),
+and the response says which it was:
+
+| Key | Values | Meaning |
+|---|---|---|
+| `evidence` | `delivery_receipts` · `run_summary` · `delivery_receipts+run_summary` | What the server actually saw for this run |
+| `run_summary` | object or `null` | The client's closing summary when one was PUT (see below) |
+
+A zero-delivery run reports every receipt-derived count as `0` (not `null`):
+nothing was delivered, so there is nothing to be unsure about. `metrics` is
+empty; the metrics the client *checked* are in `run_summary.metrics_checked`.
+
 ### `GET /api/v2/sync/runs/{sync_run_id}`
 
 Protected by `x-api-key` when `API_KEY` is set. Returns the delivery receipt
@@ -564,6 +593,61 @@ on the conflict key). A healthy full-history sync therefore reports
 `records_received - records_accepted`. In the example above, 512 received
 samples yielded 488 unique rows with 24 in-batch duplicates collapsed and 0
 genuine rejections.
+
+### `PUT /api/v2/sync/runs/{sync_run_id}/summary`
+
+Protected by `x-api-key` when `API_KEY` is set. **Optional**, like every
+`/api/v2/sync/*` route — a client treats 404/405 as "not supported" and carries
+on. iOS 1.8.0+ sends exactly one per completed run, after its last batch (or
+after finding nothing to send), and treats the call as best-effort: a failure
+here never fails the sync.
+
+The body carries counts and metric **names** only — never a health value.
+Idempotent on `sync_run_id` (the client may retry; `received_at` is preserved,
+`updated_at` moves). Deterministic validation failures are `422`, never `500`.
+
+```json
+{
+  "schema_version": 1,
+  "outcome": "completed",
+  "delivery": "none",
+  "records_sent": 0,
+  "metrics_checked": ["heart_rate", "sleep_analysis", "step_count"],
+  "metrics_with_changes": [],
+  "trigger": "observer",
+  "intent": "latest_changes",
+  "client_platform": "ios",
+  "client_app_version": "1.8.0",
+  "started_at": "2026-01-01T06:20:00.000Z",
+  "completed_at": "2026-01-01T06:20:04.000Z"
+}
+```
+
+| Field | Values | Notes |
+|---|---|---|
+| `schema_version` | `1` | Required literal |
+| `outcome` | `completed` · `failed` | iOS sends `completed`; `failed` is reserved for a client that closes failed runs |
+| `delivery` | `none` · `foreground` · `background_queued` | `none` ⇒ nothing was sent; `background_queued` ⇒ batches may still land after this PUT and are merged in as their receipts arrive |
+| `records_sent` | int ≥ 0 | |
+| `metrics_checked` | string[] | Every metric the run planned to read (names only) |
+| `metrics_with_changes` | string[] | Subset that produced at least one batch |
+| `trigger` | string, optional | `foreground` · `appRefresh` · `processing` · `observer` · `system` |
+| `intent` | `latest_changes` · `backfill` · `date_range`, optional | |
+| `error_class`, `client_platform`, `client_app_version` | string, optional | |
+| `started_at`, `completed_at` | ISO-8601, optional | Client clocks; stored as such. The server stamps its own `received_at` |
+
+Response:
+
+```json
+{ "status": "ok", "sync_run_id": "corpus-run-002", "recorded": true,
+  "received_at": "2026-01-01T06:20:05+00:00", "updated_at": "2026-01-01T06:20:05+00:00" }
+```
+
+Effect on the read routes: `runs/latest` may now answer with this run (see
+above), and `runs/{sync_run_id}` for a run with no receipts answers
+`status: "ok"` with `verification_level: "run_summary"` and an all-zero
+`summary` instead of the `status: "empty"` sentinel — the empty sentinel keeps
+meaning "nothing known about this run", which a closed run is not.
 
 ### `GET /api/v2/sync/coverage`
 
@@ -759,7 +843,7 @@ legitimate shapes per batch type:
 | `tzOffsetMinutes` | int (-1440…+1440) | optional | Server stamps the offset on the raw payload + the canonical row's provenance |
 | `motionContext` | enum | optional (HR only) | `sedentary` / `active` / `notSet`; omitted means "not present on the sample" |
 | `source` | string | required | |
-| `aggregation` | `component` \| `day_total` | optional (iOS 1.8.0+) | Declares what the value covers instead of leaving the server to infer it. Unknown value → `422`; it is never guessed. Absent ⇒ a client ≤ 1.7.2 and the legacy inference applies |
+| `aggregation` | `component` \| `day_total` | optional (iOS 1.8.0+) | Declares what the value covers instead of leaving the server to infer it. Unknown value → `422`; it is never guessed. Absent ⇒ a client ≤ 1.7.2 and the legacy inference applies. iOS 1.8.0+ declares `component` on every raw sample of a cumulative metric it sends (per-metric *Individual Samples* toggle; hand-logged metrics such as water and nutrition are on by default, high-volume ones such as steps and energy are opt-in) and `day_total` on the statistics bucket that always ships alongside |
 | `localDate` | `YYYY-MM-DD` | required on `day_total` | The local calendar day the total covers. A day total's identity is `(metric, local day)`, not an instant — sending it means the server never re-derives "which day is this" from a timestamp plus an offset. Cross-checked against `startDate` + `tzOffsetMinutes`; a disagreement is `422` |
 | `units` | object `{field: unit}` | required on a COMPOSITE `day_total` | `activity_summaries` bundles several daily totals in one dict (kcal, minutes, a count) which the server fans out per metric, so one scalar `unit` cannot describe it |
 

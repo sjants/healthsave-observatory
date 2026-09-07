@@ -593,8 +593,203 @@ async def record_sync_receipt(
     )
 
 
+# ─── Sync run summaries (client-closed runs) ─────────────────────────────
+#
+# Receipts are written per HTTP batch, so a run that had nothing to send left
+# no trace and ``latest_sync_run`` kept returning the PREVIOUS run for as long
+# as the app found nothing new. The client now closes every completed run with
+# one ``PUT /api/v2/sync/runs/{sync_run_id}/summary`` (migration 026). Receipts
+# remain the delivery proof; the summary is the run's existence proof. The two
+# readers below merge them so a zero-delivery run is a real, distinguishable
+# "latest run" instead of a lie by omission.
+
+SYNC_RUN_SUMMARY_INTENTS: frozenset[str] = frozenset({"latest_changes", "backfill", "date_range"})
+SYNC_RUN_SUMMARY_OUTCOMES: frozenset[str] = frozenset({"completed", "failed"})
+SYNC_RUN_SUMMARY_DELIVERIES: frozenset[str] = frozenset({"none", "foreground", "background_queued"})
+
+#: ``verification_level`` for a run the server knows only from the client's
+#: closing summary — nothing was delivered, so there is no delivery receipt to
+#: prove. Distinct from ``delivery_receipt`` on purpose: a consumer must be able
+#: to tell "the server saw batches" from "the client said it checked".
+RUN_SUMMARY_VERIFICATION_LEVEL = "run_summary"
+DELIVERY_RECEIPT_VERIFICATION_LEVEL = "delivery_receipt"
+
+_RUN_SUMMARY_SELECT = """
+    SELECT
+        sync_run_id,
+        client_platform,
+        client_app_version,
+        trigger,
+        intent,
+        outcome,
+        delivery,
+        records_sent,
+        metrics_checked,
+        metrics_with_changes,
+        error_class,
+        client_started_at,
+        client_completed_at,
+        received_at,
+        updated_at
+    FROM healthsave_sync_run_summaries
+"""
+
+
+async def record_sync_run_summary(
+    session: AsyncSession,
+    *,
+    owner_id: UUID,
+    sync_run_id: str,
+    outcome: str,
+    delivery: str,
+    records_sent: int,
+    metrics_checked: list[str],
+    metrics_with_changes: list[str],
+    trigger: str | None,
+    intent: str | None,
+    error_class: str | None,
+    client_platform: str | None,
+    client_app_version: str | None,
+    client_started_at: str | datetime | None,
+    client_completed_at: str | datetime | None,
+) -> dict[str, Any]:
+    """Insert or replace the closing summary for one HealthSave sync run.
+
+    Idempotent on ``sync_run_id`` — the client may retry the PUT. ``received_at``
+    is preserved on conflict (first arrival is the server-stamped run close);
+    ``updated_at`` moves. Returns the stored ``received_at``/``updated_at`` so the
+    route can echo server-stamped times back to the client.
+    """
+
+    result = await session.execute(
+        text(
+            """
+            INSERT INTO healthsave_sync_run_summaries (
+                sync_run_id, owner_id, client_platform, client_app_version,
+                trigger, intent, outcome, delivery, records_sent,
+                metrics_checked, metrics_with_changes, error_class,
+                client_started_at, client_completed_at
+            ) VALUES (
+                :sync_run_id, :owner_id, :client_platform, :client_app_version,
+                :trigger, :intent, :outcome, :delivery, :records_sent,
+                :metrics_checked, :metrics_with_changes, :error_class,
+                :client_started_at, :client_completed_at
+            )
+            ON CONFLICT (sync_run_id) DO UPDATE SET
+                client_platform = EXCLUDED.client_platform,
+                client_app_version = EXCLUDED.client_app_version,
+                trigger = EXCLUDED.trigger,
+                intent = EXCLUDED.intent,
+                outcome = EXCLUDED.outcome,
+                delivery = EXCLUDED.delivery,
+                records_sent = EXCLUDED.records_sent,
+                metrics_checked = EXCLUDED.metrics_checked,
+                metrics_with_changes = EXCLUDED.metrics_with_changes,
+                error_class = EXCLUDED.error_class,
+                client_started_at = EXCLUDED.client_started_at,
+                client_completed_at = EXCLUDED.client_completed_at,
+                updated_at = NOW()
+            RETURNING received_at, updated_at
+            """
+        ),
+        {
+            "sync_run_id": sync_run_id,
+            "owner_id": str(owner_id),
+            "client_platform": client_platform,
+            "client_app_version": client_app_version,
+            "trigger": trigger,
+            "intent": intent,
+            "outcome": outcome,
+            "delivery": delivery,
+            "records_sent": records_sent,
+            "metrics_checked": sorted(set(metrics_checked)),
+            "metrics_with_changes": sorted(set(metrics_with_changes)),
+            "error_class": error_class,
+            "client_started_at": _parse_time_value(client_started_at),
+            "client_completed_at": _parse_time_value(client_completed_at),
+        },
+    )
+    row = result.mappings().first()
+    stamped = dict(row) if row is not None else {}
+    return {
+        "status": "ok",
+        "sync_run_id": sync_run_id,
+        "recorded": True,
+        "received_at": stamped.get("received_at"),
+        "updated_at": stamped.get("updated_at"),
+    }
+
+
+def _format_run_summary(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "sync_run_id": row["sync_run_id"],
+        "client_platform": row.get("client_platform"),
+        "client_app_version": row.get("client_app_version"),
+        "trigger": row.get("trigger"),
+        "intent": row.get("intent"),
+        "outcome": row.get("outcome"),
+        "delivery": row.get("delivery"),
+        "records_sent": row.get("records_sent") or 0,
+        "metrics_checked": list(row.get("metrics_checked") or []),
+        "metrics_with_changes": list(row.get("metrics_with_changes") or []),
+        "error_class": row.get("error_class"),
+        "client_started_at": row.get("client_started_at"),
+        "client_completed_at": row.get("client_completed_at"),
+        "received_at": row.get("received_at"),
+    }
+
+
+async def _latest_run_summary(session: AsyncSession) -> dict[str, Any] | None:
+    result = await session.execute(
+        text(_RUN_SUMMARY_SELECT + " ORDER BY received_at DESC LIMIT 1")
+    )
+    row = result.mappings().first()
+    return dict(row) if row is not None else None
+
+
+async def _run_summary(session: AsyncSession, sync_run_id: str) -> dict[str, Any] | None:
+    result = await session.execute(
+        text(_RUN_SUMMARY_SELECT + " WHERE sync_run_id = :sync_run_id"),
+        {"sync_run_id": sync_run_id},
+    )
+    row = result.mappings().first()
+    return dict(row) if row is not None else None
+
+
+def _evidence_label(has_receipts: bool, has_summary: bool) -> str:
+    if has_receipts and has_summary:
+        return "delivery_receipts+run_summary"
+    if has_receipts:
+        return "delivery_receipts"
+    return "run_summary"
+
+
+def _newer(left: Any, right: Any) -> bool:
+    """True when ``left`` is strictly newer than ``right`` (None is oldest)."""
+    if left is None:
+        return False
+    if right is None:
+        return True
+    return _compare_time_values(left, right) > 0
+
+
 async def latest_sync_run(session: AsyncSession) -> dict[str, Any]:
-    """Summarize the most recently observed HealthSave sync run."""
+    """Summarize the most recently observed HealthSave sync run.
+
+    "Observed" means EITHER the server received batches for it (receipts) OR the
+    client closed it with a run summary (migration 026). A run that had nothing
+    to send has no receipts, so before the summaries existed this endpoint kept
+    answering with the previous run — the Observatory showed an app that syncs
+    every 10 minutes as having stopped hours ago. The newest evidence of either
+    kind wins, judged by server-stamped time only; when both describe the same
+    run they are merged.
+
+    NOTE: every key iOS decodes is emitted from THIS function's source (SQL
+    alias, dict literal or item assignment) — ``test_ios_v2_surface.py`` pins
+    them here. Keep the SQL and the zero-delivery literal inline.
+    """
 
     result = await session.execute(
         text(
@@ -608,46 +803,101 @@ async def latest_sync_run(session: AsyncSession) -> dict[str, Any]:
         )
     )
     row = result.mappings().first()
-    if row is None:
+    receipt_run: dict[str, Any] | None = None
+    if row is not None:
+        summary_result = await session.execute(
+            text(
+                """
+                SELECT
+                    sync_run_id,
+                    min(received_at) AS started_at,
+                    max(coalesce(completed_at, received_at)) AS completed_at,
+                    count(*) AS batches_seen,
+                    count(*) FILTER (WHERE status = 'processed') AS batches_processed,
+                    count(*) FILTER (WHERE status = 'empty') AS batches_empty,
+                    count(*) FILTER (WHERE status = 'failed') AS batches_failed,
+                    coalesce(sum(records_received), 0) AS records_received,
+                    coalesce(sum(records_accepted), 0) AS records_accepted,
+                    sum(records_inserted_new) AS records_inserted_new,
+                    sum(records_deduped_existing) AS records_deduped_existing,
+                    CASE
+                        WHEN count(*) FILTER (
+                            WHERE storage_result_level = 'inserted_vs_existing'
+                        ) = count(*) THEN 'inserted_vs_existing'
+                        ELSE 'accepted_only'
+                    END AS storage_result_level,
+                    coalesce(sum(records_skipped), 0) AS records_skipped,
+                    min(sample_min_at) AS sample_min_at,
+                    max(sample_max_at) AS sample_max_at,
+                    array_agg(DISTINCT metric ORDER BY metric) AS metrics
+                FROM healthsave_sync_receipts
+                WHERE sync_run_id = :sync_run_id
+                GROUP BY sync_run_id
+                """
+            ),
+            {"sync_run_id": row["sync_run_id"]},
+        )
+        summary_row = summary_result.mappings().first()
+        receipt_run = dict(summary_row) if summary_row is not None else None
+
+    latest_summary = await _latest_run_summary(session)
+
+    if receipt_run is None and latest_summary is None:
         return {"status": "empty", "message": "No HealthSave sync receipts recorded yet."}
 
-    sync_run_id = row["sync_run_id"]
-    summary_result = await session.execute(
-        text(
-            """
-            SELECT
-                sync_run_id,
-                min(received_at) AS started_at,
-                max(coalesce(completed_at, received_at)) AS completed_at,
-                count(*) AS batches_seen,
-                count(*) FILTER (WHERE status = 'processed') AS batches_processed,
-                count(*) FILTER (WHERE status = 'empty') AS batches_empty,
-                count(*) FILTER (WHERE status = 'failed') AS batches_failed,
-                coalesce(sum(records_received), 0) AS records_received,
-                coalesce(sum(records_accepted), 0) AS records_accepted,
-                sum(records_inserted_new) AS records_inserted_new,
-                sum(records_deduped_existing) AS records_deduped_existing,
-                CASE
-                    WHEN count(*) FILTER (
-                        WHERE storage_result_level = 'inserted_vs_existing'
-                    ) = count(*) THEN 'inserted_vs_existing'
-                    ELSE 'accepted_only'
-                END AS storage_result_level,
-                coalesce(sum(records_skipped), 0) AS records_skipped,
-                min(sample_min_at) AS sample_min_at,
-                max(sample_max_at) AS sample_max_at,
-                array_agg(DISTINCT metric ORDER BY metric) AS metrics
-            FROM healthsave_sync_receipts
-            WHERE sync_run_id = :sync_run_id
-            GROUP BY sync_run_id
-            """
-        ),
-        {"sync_run_id": sync_run_id},
-    )
-    summary = dict(summary_result.mappings().first())
+    # Which run is "latest": the receipt run's newest receipt vs the summary's
+    # arrival, both server-stamped. Client clocks never participate.
+    receipt_time = receipt_run["completed_at"] if receipt_run is not None else None
+    summary_time = latest_summary["received_at"] if latest_summary is not None else None
+
+    if receipt_run is not None and (
+        latest_summary is None
+        or latest_summary["sync_run_id"] == receipt_run["sync_run_id"]
+        or not _newer(summary_time, receipt_time)
+    ):
+        summary = dict(receipt_run)
+        same_run = (
+            latest_summary is not None
+            and latest_summary["sync_run_id"] == receipt_run["sync_run_id"]
+        )
+        if same_run:
+            run_summary = latest_summary
+        else:
+            run_summary = await _run_summary(session, receipt_run["sync_run_id"])
+        summary["evidence"] = _evidence_label(True, run_summary is not None)
+    else:
+        assert latest_summary is not None
+        # Zero-delivery run: the client checked and had nothing to send (or its
+        # batches are still in flight on a background session and no receipt
+        # has landed yet — the next poll merges them in). Zero, not null:
+        # nothing was delivered, so there is nothing to be unsure about.
+        # ``storage_result_level`` is vacuously ``inserted_vs_existing``; the
+        # iOS decoder renders that as "0 new, 0 existing" — exactly the truth.
+        run_summary = latest_summary
+        summary = {
+            "sync_run_id": latest_summary["sync_run_id"],
+            "started_at": latest_summary.get("client_started_at") or latest_summary["received_at"],
+            "completed_at": latest_summary["received_at"],
+            "batches_seen": 0,
+            "batches_processed": 0,
+            "batches_empty": 0,
+            "batches_failed": 0,
+            "records_received": 0,
+            "records_accepted": 0,
+            "records_inserted_new": 0,
+            "records_deduped_existing": 0,
+            "storage_result_level": "inserted_vs_existing",
+            "records_skipped": 0,
+            "sample_min_at": None,
+            "sample_max_at": None,
+            "metrics": [],
+            "evidence": _evidence_label(False, True),
+        }
+
     summary["status"] = "ok"
     summary["sample_window"] = _sample_window(summary)
     summary["latest_sample_time"] = summary["sample_max_at"]
+    summary["run_summary"] = _format_run_summary(run_summary)
     return summary
 
 
@@ -692,11 +942,41 @@ async def sync_run(session: AsyncSession, sync_run_id: str) -> dict[str, Any]:
         {"sync_run_id": sync_run_id},
     )
     rows = [dict(row) for row in result.mappings().all()]
+    run_summary = await _run_summary(session, sync_run_id)
     if not rows:
+        if run_summary is None:
+            return {
+                "status": "empty",
+                "sync_run_id": sync_run_id,
+                "message": "No HealthSave sync receipts recorded for this run.",
+            }
+        # The client closed this run without sending a single batch. That is
+        # a real, complete run — not "no receipt yet" — so it must NOT decode
+        # as the empty sentinel (iOS treats ``status: empty`` as "nothing
+        # known about this run" and keeps waiting).
         return {
-            "status": "empty",
+            "status": "ok",
             "sync_run_id": sync_run_id,
-            "message": "No HealthSave sync receipts recorded for this run.",
+            "verification_level": RUN_SUMMARY_VERIFICATION_LEVEL,
+            "evidence": _evidence_label(False, True),
+            "started_at": run_summary.get("client_started_at") or run_summary["received_at"],
+            "completed_at": run_summary["received_at"],
+            "summary": {
+                "metrics_seen": 0,
+                "batches_seen": 0,
+                "batches_processed": 0,
+                "batches_empty": 0,
+                "batches_failed": 0,
+                "records_received": 0,
+                "records_accepted": 0,
+                "records_inserted_new": 0,
+                "records_deduped_existing": 0,
+                "storage_result_level": "inserted_vs_existing",
+                "records_rejected": 0,
+                "sample_window": {"min_sample_time": None, "max_sample_time": None},
+            },
+            "per_metric": {},
+            "run_summary": _format_run_summary(run_summary),
         }
 
     per_metric = {
@@ -719,7 +999,9 @@ async def sync_run(session: AsyncSession, sync_run_id: str) -> dict[str, Any]:
     return {
         "status": "ok",
         "sync_run_id": sync_run_id,
-        "verification_level": "delivery_receipt",
+        "verification_level": DELIVERY_RECEIPT_VERIFICATION_LEVEL,
+        "evidence": _evidence_label(True, run_summary is not None),
+        "run_summary": _format_run_summary(run_summary),
         "started_at": min(row["started_at"] for row in rows if row["started_at"] is not None),
         "completed_at": max(row["completed_at"] for row in rows if row["completed_at"] is not None),
         "summary": {
@@ -938,6 +1220,9 @@ class TimescaleSyncReceiptRepository:
 
     async def sync_run(self, session: AsyncSession, sync_run_id: str) -> dict[str, Any]:
         return await sync_run(session, sync_run_id)
+
+    async def record_sync_run_summary(self, session: AsyncSession, **fields: Any) -> dict[str, Any]:
+        return await record_sync_run_summary(session, **fields)
 
     async def sync_coverage(self, session: AsyncSession) -> dict[str, Any]:
         return await sync_coverage(session)
