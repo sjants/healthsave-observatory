@@ -55,6 +55,11 @@ _COMPOSITE_DAY_TOTAL_FIXTURES = {"activity_summaries_batch.json"}
 # must be a deliberate, named decision, not an omission that the aggregate
 # exemption quietly absorbs.
 _LEGACY_AGGREGATE_FIXTURES: set[str] = set()
+# Raw HKSample COMPONENTS of a cumulative metric (iOS 1.8.0+, per-metric
+# "Individual Samples" toggle). The same wire name also carries a day total, so
+# every sample must DECLARE `aggregation: "component"` on top of the anchored
+# identity set — the server must never infer it from the presence of a uuid.
+_COMPONENT_FIXTURES = {"dietary_water_batch.json"}
 # Category events carry ``qty`` as a duration in seconds with no unit key —
 # the ontology has no quantity definition for them, so the unit gate is
 # lenient by design (matches the extractor).
@@ -101,6 +106,13 @@ def test_fixture_validates_as_v2_payload(name: str) -> None:
     assert payload.samples, f"{name} has no samples"
     for sample in payload.samples:
         dumped = sample.model_dump(exclude_none=True)
+        if name in _COMPONENT_FIXTURES:
+            assert dumped.get("aggregation") == "component", (
+                f"{name}: a cumulative metric's raw sample must DECLARE it is a component — "
+                "the same wire name also carries day totals: {dumped}"
+            )
+            assert "localDate" not in dumped, f"{name}: only day totals name a calendar day"
+            assert _ANCHORED_KEYS <= set(dumped), f"{name}: component missing identity keys: {dumped}"
         if name in _AGGREGATE_FIXTURES:
             assert "uuid" not in dumped, f"{name}: aggregates carry no HKSample identity"
             assert "date" in dumped
