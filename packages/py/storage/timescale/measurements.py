@@ -247,14 +247,29 @@ async def _execute_batch_insert_with_flags(
 
 
 async def _get_or_create_device(session: AsyncSession, device_type: str) -> int:
+    # Read first: the device almost always exists, and a plain SELECT takes no
+    # row lock. The upsert below DOES lock the row until COMMIT — and device
+    # resolution opens the ingest transaction that only commits after the whole
+    # batch is written (server/api/ingest.py), so upserting unconditionally
+    # would make every concurrent batch from the same device queue behind the
+    # previous batch's entire write.
     result = await session.execute(
         text("SELECT id FROM devices WHERE device_type = :dt"), {"dt": device_type}
     )
     row = result.first()
     if row:
         return row[0]
+    # First sighting of this device: two concurrent batches can both miss the
+    # SELECT above, so creation itself must be atomic. DO UPDATE (not DO
+    # NOTHING) so the losing writer still gets a row back to RETURN.
     result = await session.execute(
-        text("INSERT INTO devices (device_type) VALUES (:dt) RETURNING id"),
+        text("""
+            INSERT INTO devices (device_type)
+            VALUES (:dt)
+            ON CONFLICT (device_type) DO UPDATE
+            SET device_type = EXCLUDED.device_type
+            RETURNING id
+        """),
         {"dt": device_type},
     )
     return result.scalar()
@@ -326,6 +341,51 @@ async def _ingest_metric(
     return await _ingest_generic(session, device_id, metric, samples, owner_id=owner_id)
 
 
+async def _promote_legacy_source_uuids(
+    session: AsyncSession,
+    table: str,
+    rows: list[dict],
+) -> None:
+    """Attach incoming UUID identity to matching active legacy rows.
+
+    Rows written before source_uuid support may already occupy the legacy
+    (time, device_id, owner_id) unique slot. Promote those rows before the
+    UUID-aware upsert so retries can adopt the existing measurement instead
+    of colliding with the legacy unique index.
+    """
+    if not rows:
+        return
+
+    values = []
+    params = {}
+    for index, row in enumerate(rows):
+        values.append(
+            f"(CAST(:time_{index} AS TIMESTAMPTZ), CAST(:device_id_{index} AS INTEGER), "
+            f"CAST(:owner_id_{index} AS UUID), CAST(:source_uuid_{index} AS UUID))"
+        )
+        params[f"time_{index}"] = row["time"]
+        params[f"device_id_{index}"] = row["device_id"]
+        params[f"owner_id_{index}"] = row["owner_id"]
+        params[f"source_uuid_{index}"] = row["source_uuid"]
+
+    await session.execute(
+        text(
+            f"""
+            UPDATE {table} AS existing
+               SET source_uuid = incoming.source_uuid
+              FROM (VALUES {", ".join(values)})
+                   AS incoming(time, device_id, owner_id, source_uuid)
+             WHERE existing.time = incoming.time
+               AND existing.device_id = incoming.device_id
+               AND existing.owner_id = incoming.owner_id
+               AND existing.status = 'active'
+               AND existing.source_uuid IS NULL
+            """
+        ),
+        params,
+    )
+
+
 async def _ingest_dedicated(
     session: AsyncSession,
     device_id: int,
@@ -392,6 +452,9 @@ async def _ingest_dedicated(
             identity_rows, ["owner_id", "source_uuid", "time"], metric
         )
         dedup_count += dedup_id
+
+        await _promote_legacy_source_uuids(session, spec["table"], rows_id)
+
         columns = list(rows_id[0].keys())
         update_set = ", ".join(
             f"{c} = EXCLUDED.{c}"

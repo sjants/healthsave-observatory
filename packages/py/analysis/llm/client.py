@@ -47,8 +47,9 @@ _THINK_BLOCK_RE = re.compile(
 )
 
 # Adaptive budget for reasoning models: when an attempt ends with
-# ``finish_reason == "length"`` and NO extractable prose (the model spent the
-# whole budget thinking), retry the same candidate once with a boosted
+# a length limit (reported or inferred for Ollama) and NO extractable prose
+# (the model spent the whole budget thinking), retry the same candidate
+# once with a boosted
 # ``max_tokens`` instead of failing over to a model the user didn't pick.
 _TRUNCATION_RETRY_FACTOR = 4
 _TRUNCATION_RETRY_CAP = 8192
@@ -397,7 +398,7 @@ class HealthLLMClient:
 
         # Adaptive budget: attempt 1 uses the configured max_tokens; if the
         # model is a reasoning model that spent the entire budget thinking
-        # (finish_reason "length" + no extractable prose), attempt 2 retries
+        # (reported/inferred length limit + no extractable prose), attempt 2 retries
         # the SAME candidate with a boosted budget before failing over.
         max_tokens = self.config.max_tokens
         tokens_in = tokens_out = 0
@@ -424,7 +425,8 @@ class HealthLLMClient:
             # budget is still spend the operator should see.
             usage = getattr(response, "usage", None)
             tokens_in += int(getattr(usage, "prompt_tokens", 0) or 0) if usage else 0
-            tokens_out += int(getattr(usage, "completion_tokens", 0) or 0) if usage else 0
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0) if usage else 0
+            tokens_out += completion_tokens
 
             if raw:
                 if finish_reason == "length":
@@ -437,7 +439,18 @@ class HealthLLMClient:
                 break
 
             boosted = min(max_tokens * _TRUNCATION_RETRY_FACTOR, _TRUNCATION_RETRY_CAP)
-            if finish_reason == "length" and attempt == 1 and boosted > max_tokens:
+            # Older LiteLLM can misreport Ollama's length limit as "stop".
+            # Use this response's usage, not the accumulated token total.
+            exhausted_ollama_budget = (
+                candidate.provider == "ollama"
+                and finish_reason == "stop"
+                and completion_tokens >= max_tokens
+            )
+            if (
+                (finish_reason == "length" or exhausted_ollama_budget)
+                and attempt == 1
+                and boosted > max_tokens
+            ):
                 log.warning(
                     "narrator: %s spent all %d tokens reasoning with no prose; "
                     "retrying once with max_tokens=%d",
