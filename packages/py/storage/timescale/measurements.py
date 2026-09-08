@@ -241,6 +241,21 @@ async def _execute_batch_insert_with_flags(
 
 
 async def _get_or_create_device(session: AsyncSession, device_type: str) -> int:
+    # Read first: the device almost always exists, and a plain SELECT takes no
+    # row lock. The upsert below DOES lock the row until COMMIT — and device
+    # resolution opens the ingest transaction that only commits after the whole
+    # batch is written (server/api/ingest.py), so upserting unconditionally
+    # would make every concurrent batch from the same device queue behind the
+    # previous batch's entire write.
+    result = await session.execute(
+        text("SELECT id FROM devices WHERE device_type = :dt"), {"dt": device_type}
+    )
+    row = result.first()
+    if row:
+        return row[0]
+    # First sighting of this device: two concurrent batches can both miss the
+    # SELECT above, so creation itself must be atomic. DO UPDATE (not DO
+    # NOTHING) so the losing writer still gets a row back to RETURN.
     result = await session.execute(
         text("""
             INSERT INTO devices (device_type)

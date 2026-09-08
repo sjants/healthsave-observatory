@@ -502,12 +502,12 @@ async def test_batch_uses_sample_source_for_device_identity_and_logs_raw_payload
 
     result = await server.apple_batch(request, session)
 
-    device_upserts = [
-        params for sql, params in session.calls if sql.startswith("INSERT INTO devices")
+    device_lookups = [
+        params for sql, params in session.calls if sql.startswith("SELECT id FROM devices")
     ]
     raw_log = session.insert_params_for("raw_ingestion_log")
     assert result["records"] == 1
-    assert device_upserts[0]["dt"] == "Apple Watch Ultra"
+    assert device_lookups[0]["dt"] == "Apple Watch Ultra"
     assert raw_log is not None
     assert raw_log["source_type"] == "healthsave"
     assert raw_log["endpoint"] == "/api/apple/batch"
