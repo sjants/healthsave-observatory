@@ -834,9 +834,7 @@ async def _ingest_cumulative_by_scope(
     result = IngestWriteResult()
     if day_totals:
         result = result.combine(
-            await _ingest_daily_quantity(
-                session, device_id, metric, day_totals, owner_id=owner_id
-            )
+            await _ingest_daily_quantity(session, device_id, metric, day_totals, owner_id=owner_id)
         )
     if components:
         result = result.combine(

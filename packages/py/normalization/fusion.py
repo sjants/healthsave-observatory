@@ -43,8 +43,6 @@ from normalization.identity import normalize_origin
 __all__ = ["AggregationScope"]
 
 
-
-
 class DeviceLinkConfidence(StrEnum):
     """Confidence that an HC stream and a direct stream are the same emitter.
     Manufacturer/model is evidence, not identity — only STRONG (or user-confirmed)

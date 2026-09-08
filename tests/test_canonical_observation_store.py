@@ -261,9 +261,7 @@ async def test_insert_many_only_updates_newer_apple_daily_total_corrections() ->
     # guard that collision was `DO UPDATE ... WHERE false`, i.e. a silent no-op
     # that kept the stale value.
     assert "canonical_observations.aggregation_scope = EXCLUDED.aggregation_scope" in sql
-    assert "'owner_all_source_day_total'" not in sql, (
-        "the guard must not special-case one scope"
-    )
+    assert "'owner_all_source_day_total'" not in sql, "the guard must not special-case one scope"
     # A deletion stays authoritative: re-ingesting a superseded row must not
     # resurrect it. Only a genuinely new sample (new uuid -> new dedup_key ->
     # new row) brings data back.

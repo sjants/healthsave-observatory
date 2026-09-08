@@ -112,7 +112,9 @@ def test_fixture_validates_as_v2_payload(name: str) -> None:
                 "the same wire name also carries day totals: {dumped}"
             )
             assert "localDate" not in dumped, f"{name}: only day totals name a calendar day"
-            assert _ANCHORED_KEYS <= set(dumped), f"{name}: component missing identity keys: {dumped}"
+            assert set(dumped) >= _ANCHORED_KEYS, (
+                f"{name}: component missing identity keys: {dumped}"
+            )
         if name in _AGGREGATE_FIXTURES:
             assert "uuid" not in dumped, f"{name}: aggregates carry no HKSample identity"
             assert "date" in dumped

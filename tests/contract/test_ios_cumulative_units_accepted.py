@@ -107,6 +107,5 @@ def test_every_cumulative_unit_is_in_the_metrics_allowed_units() -> None:
             if spelling is not None and spelling not in allowed:
                 offenders.append((wire, f"{spelling!r} not in {sorted(allowed)}"))
     assert not offenders, (
-        "these metrics would 422 every sample once iOS declares their unit: "
-        f"{offenders}"
+        f"these metrics would 422 every sample once iOS declares their unit: {offenders}"
     )

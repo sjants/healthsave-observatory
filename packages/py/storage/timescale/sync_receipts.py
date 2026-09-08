@@ -742,9 +742,7 @@ def _format_run_summary(row: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 async def _latest_run_summary(session: AsyncSession) -> dict[str, Any] | None:
-    result = await session.execute(
-        text(_RUN_SUMMARY_SELECT + " ORDER BY received_at DESC LIMIT 1")
-    )
+    result = await session.execute(text(_RUN_SUMMARY_SELECT + " ORDER BY received_at DESC LIMIT 1"))
     row = result.mappings().first()
     return dict(row) if row is not None else None
 
