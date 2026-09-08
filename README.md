@@ -12,6 +12,7 @@
   <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-0.115-111318?style=for-the-badge&logo=fastapi&logoColor=009688" alt="FastAPI"></a>
   <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/Docker-Ready-111318?style=for-the-badge&logo=docker&logoColor=2496ED" alt="Docker ready"></a>
   <a href="https://apps.apple.com/app/id6759843047"><img src="https://img.shields.io/badge/Download%20on%20the-App%20Store-0D96F6?style=for-the-badge&logo=apple&logoColor=white" alt="Download on the App Store"></a>
+  <a href="https://healthsave.app"><img src="https://img.shields.io/badge/Docs%20%26%20Guides-healthsave.app-111318?style=for-the-badge&logo=safari&logoColor=white" alt="healthsave.app"></a>
 </p>
 
 HealthSave Observatory is the self-hosted backend for HealthSave. The iOS app can export and sync Apple Health data; Observatory gives that data a private server, web surface, Grafana dashboards, API, optional local AI briefings, and Home Assistant/MQTT routes.
@@ -169,7 +170,9 @@ Surfaces and routes
 
 Do not use `localhost` from the phone. `localhost` would point at the phone itself. The iOS app sends Apple Health data through the frozen v1 ingest contract: `POST /api/apple/batch`.
 
-HealthSave iOS also works without Observatory: on-device dashboard, trends, and CSV/JSON/PDF export do not need an account or a cloud server.
+HealthSave iOS also works without Observatory: on-device dashboard, trends, and CSV/JSON/PDF export do not need an account or a cloud server. Setup walkthroughs, per-metric reference, and troubleshooting live at [healthsave.app](https://healthsave.app/).
+
+Going straight to Home Assistant without running Observatory at all is also supported — the app writes `sensor.healthsave_*` entities over the HA REST API. See [Push Apple Health into Home Assistant](https://healthsave.app/guides/apple-health-to-home-assistant/).
 
 ## Automation
 
@@ -219,6 +222,12 @@ HealthSave Observatory runs on macOS, Linux, and WSL2 with Docker Compose v2. Na
 - [Deployment](docs/operations/deployment.md) - run on a laptop, VM, NAS, Proxmox VM, or homelab box.
 - [CLI distribution](docs/operations/cli-distribution.md) - npm/npx, installers, repo-local launcher, and Homebrew release shape.
 - [Development](docs/development/dev-setup.md) - local development and verification.
+
+Product-side documentation (iOS app setup, metric reference, export guides, troubleshooting,
+and free in-browser tools) lives at **[healthsave.app](https://healthsave.app/)** —
+[export guide](https://healthsave.app/export-health-data.html) ·
+[metric reference](https://healthsave.app/metrics/) ·
+[Apple Health XML to CSV converter](https://healthsave.app/tools/health-export-to-csv/) (free, runs in your browser).
 
 ## License
 
