@@ -779,9 +779,26 @@ def _daily_data_days(metrics: dict[str, dict]) -> int:
     return 1 if any((metric.get("sample_count") or 0) > 0 for metric in metrics.values()) else 0
 
 
+def _canonical_anomaly_time(value: datetime | str | None) -> str | None:
+    """Normalize equivalent anomaly timestamps to one dedup representation."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    if value.tzinfo is not None:
+        value = value.astimezone(UTC)
+    return value.isoformat()
+
+
 def _anomaly_key(anomaly: Anomaly) -> tuple[str, str | None, str]:
-    detected_at = anomaly.detected_at.isoformat() if anomaly.detected_at is not None else None
-    return (anomaly.metric, detected_at, anomaly.direction)
+    return (
+        anomaly.metric,
+        _canonical_anomaly_time(anomaly.detected_at),
+        anomaly.direction,
+    )
 
 
 def _anomaly_key_from_data(
@@ -796,6 +813,6 @@ def _anomaly_key_from_data(
         structured_data = {}
     return (
         metric or structured_data.get("metric"),
-        structured_data.get("detected_at"),
+        _canonical_anomaly_time(structured_data.get("detected_at")),
         structured_data.get("direction"),
     )
