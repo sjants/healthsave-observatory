@@ -340,3 +340,93 @@ async def test_registry_load_path_produces_same_writes_as_direct_path():
         "registry path issued different SQL than the direct path — "
         "Phase 7 will inherit a Schrödinger SDK"
     )
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_device_creates_atomically_when_absent():
+    """A first-sighting device must be created with a single atomic upsert.
+
+    Two concurrent batches can both miss the SELECT, so creation cannot be a
+    bare INSERT — the loser would take a UniqueViolation and fail an otherwise
+    valid batch (issue #28).
+    """
+    from types import SimpleNamespace
+
+    from sqlalchemy.exc import IntegrityError
+    from storage.timescale.measurements import _get_or_create_device
+
+    class ConcurrentInsertSession:
+        """Simulates a racing peer: the row is absent at SELECT, present at INSERT."""
+
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, statement, params=None):
+            sql = " ".join(str(statement).split())
+            self.calls.append((sql, params or {}))
+
+            if sql.startswith("SELECT id FROM devices"):
+                return SimpleNamespace(first=lambda: None)
+
+            if sql.startswith("INSERT INTO devices"):
+                if "ON CONFLICT" not in sql:
+                    raise IntegrityError(
+                        sql,
+                        params,
+                        Exception(
+                            "duplicate key value violates unique constraint "
+                            '"devices_device_type_key"'
+                        ),
+                    )
+
+                return SimpleNamespace(scalar=lambda: 42)
+
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    session = ConcurrentInsertSession()
+
+    device_id = await _get_or_create_device(session, "Test Device")
+
+    assert device_id == 42
+    insert_sql, insert_params = session.calls[-1]
+    assert "INSERT INTO devices" in insert_sql
+    assert "ON CONFLICT (device_type)" in insert_sql
+    assert "RETURNING id" in insert_sql
+    assert insert_params == {"dt": "Test Device"}
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_device_reads_without_writing_when_present():
+    """The hot path must stay a lock-free read.
+
+    ``INSERT ... ON CONFLICT DO UPDATE`` locks the devices row until COMMIT,
+    and device resolution opens the ingest transaction that commits only after
+    the whole batch lands. Upserting an already-known device would serialize
+    every concurrent batch from that device behind the previous one.
+    """
+    from types import SimpleNamespace
+
+    from storage.timescale.measurements import _get_or_create_device
+
+    class ExistingDeviceSession:
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, statement, params=None):
+            sql = " ".join(str(statement).split())
+            self.calls.append((sql, params or {}))
+
+            if sql.startswith("SELECT id FROM devices"):
+                return SimpleNamespace(first=lambda: (7,))
+
+            raise AssertionError(f"known device must not issue writes, got: {sql}")
+
+    session = ExistingDeviceSession()
+
+    device_id = await _get_or_create_device(session, "Apple Watch Ultra")
+
+    assert device_id == 7
+    assert len(session.calls) == 1
+    sql, params = session.calls[0]
+    assert sql.startswith("SELECT id FROM devices")
+    assert params == {"dt": "Apple Watch Ultra"}
