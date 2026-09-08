@@ -239,6 +239,113 @@ async def test_thinking_exhausted_budget_retries_same_model_with_boost(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_ollama_exhausted_budget_retries_despite_stop_finish_reason(monkeypatch):
+    """Ollama's exhausted budget must trigger a retry even if reported as stop."""
+    responses = [
+        _fake_response(
+            "<think>still planning the narrative",
+            completion_tokens=1000,
+            finish_reason="stop",
+        ),
+        _fake_response(
+            "Resting heart rate stayed near baseline.",
+            completion_tokens=900,
+        ),
+    ]
+    acompletion = AsyncMock(side_effect=responses)
+    _install_fake_litellm(monkeypatch, acompletion)
+
+    config = LLMConfig(provider="ollama", model="qwen3:6b", max_tokens=1000)
+    client = llm_client.HealthLLMClient(config)
+    result = await client.generate_insight("p", insight_type="daily_briefing")
+
+    assert acompletion.await_count == 2
+    first, second = acompletion.await_args_list
+    assert first.kwargs["model"] == second.kwargs["model"] == "ollama/qwen3:6b"
+    assert first.kwargs["max_tokens"] == 1000
+    assert second.kwargs["max_tokens"] == 4000
+    assert "Resting heart rate stayed near baseline." in result.narrative
+    assert result.tokens_in == 42 + 42
+    assert result.tokens_out == 1000 + 900
+    assert result.failovers == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completion_tokens", [999, None])
+async def test_ollama_stop_without_exhausted_budget_does_not_retry(monkeypatch, completion_tokens):
+    response = _fake_response("<think>still planning", completion_tokens=999)
+    if completion_tokens is None:
+        response.usage = None
+    acompletion = AsyncMock(return_value=response)
+    _install_fake_litellm(monkeypatch, acompletion)
+    client = llm_client.HealthLLMClient(LLMConfig(provider="ollama", max_tokens=1000))
+
+    with pytest.raises(llm_client.LLMUnavailableError, match="empty narrative"):
+        await client.generate_insight("p", insight_type="daily_briefing")
+    assert acompletion.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_ollama_exhausted_budget_with_prose_does_not_retry(monkeypatch):
+    acompletion = AsyncMock(
+        return_value=_fake_response("Recovery looks solid today.", completion_tokens=1000)
+    )
+    _install_fake_litellm(monkeypatch, acompletion)
+    client = llm_client.HealthLLMClient(LLMConfig(provider="ollama", max_tokens=1000))
+
+    result = await client.generate_insight("p", insight_type="daily_briefing")
+    assert "Recovery looks solid today." in result.narrative
+    assert acompletion.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_ollama_stop_retry_still_empty_stops_after_two_calls(monkeypatch):
+    responses = [
+        _fake_response("<think>still planning", completion_tokens=1000),
+        _fake_response("<think>still planning", completion_tokens=4000),
+    ]
+    acompletion = AsyncMock(side_effect=responses)
+    _install_fake_litellm(monkeypatch, acompletion)
+    client = llm_client.HealthLLMClient(LLMConfig(provider="ollama", max_tokens=1000))
+
+    with pytest.raises(llm_client.LLMUnavailableError, match="boosted-budget retry"):
+        await client.generate_insight("p", insight_type="daily_briefing")
+    assert acompletion.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ollama_stop_at_retry_cap_does_not_retry(monkeypatch):
+    acompletion = AsyncMock(
+        return_value=_fake_response("<think>still planning", completion_tokens=8192)
+    )
+    _install_fake_litellm(monkeypatch, acompletion)
+    client = llm_client.HealthLLMClient(LLMConfig(provider="ollama", max_tokens=8192))
+
+    with pytest.raises(llm_client.LLMUnavailableError, match="empty narrative"):
+        await client.generate_insight("p", insight_type="daily_briefing")
+    assert acompletion.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cloud_stop_at_token_budget_does_not_retry(monkeypatch):
+    acompletion = AsyncMock(
+        return_value=_fake_response("<think>still planning", completion_tokens=1000)
+    )
+    _install_fake_litellm(monkeypatch, acompletion)
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-4o-mini",
+        max_tokens=1000,
+        allow_cloud_egress=True,
+    )
+    client = llm_client.HealthLLMClient(config)
+
+    with pytest.raises(llm_client.LLMUnavailableError, match="empty narrative"):
+        await client.generate_insight("p", insight_type="daily_briefing")
+    assert acompletion.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_boosted_retry_still_empty_fails_the_candidate(monkeypatch):
     acompletion = AsyncMock(
         return_value=_fake_response("<think>never stops thinking", finish_reason="length")
