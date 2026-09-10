@@ -608,6 +608,7 @@ _QUANTITY: list[MetricDefinition] = [
         "Workout Effort Score",
         "activity",
         "score",
+        allowed=["score", "appleEffortScore"],
         lo=0,
         hi=10,
         kind="summary",

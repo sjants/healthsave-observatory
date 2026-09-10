@@ -633,6 +633,7 @@ def test_unit_gate_accepts_canonical_and_healthkit_spellings() -> None:
     cases = [
         ("vo2_max", 52.1, ("ml/kg/min", "ml/kg*min", "mL/min·kg")),
         ("physical_effort", 3.2, ("kcal/kg/hr", "kcal/(kg*hr)", "kcal/hr·kg")),
+        ("workout_effort_score", 5, ("score", "appleEffortScore")),
         ("estimated_workout_effort_score", 5, ("score", "appleEffortScore")),
     ]
     for metric, qty, units in cases:
