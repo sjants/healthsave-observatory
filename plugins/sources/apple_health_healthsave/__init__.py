@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from normalization.identity import resolve_apple_origin
 from plugin_sdk import PluginManifest, Source
 from server.ingestion.owner import DEFAULT_OWNER_ID
 from server.ingestion.parsers import group_samples_by_device
@@ -111,21 +112,75 @@ class AppleHealthSource(Source):
         if not samples:
             return {"accepted": 0, "rejected": 0}
 
-        if projection is not None and canonical_observations:
-            written = await projection.project_observations(
-                session, device_id, metric, canonical_observations, owner_id
-            )
-            projected = coerce_ingest_result(written)
-            if (
-                projected.accepted
-                or projected.rejected
-                or projected.deduped_in_batch
-                or projected.inserted_new is not None
-                or projected.deduped_existing is not None
-            ):
-                return projected.to_plugin_result()
-
         sample_groups = group_samples_by_device(samples)
+
+        if projection is not None and canonical_observations:
+            # Preserve the existing fast path for ordinary single-device batches.
+            if len(sample_groups) == 1:
+                written = await projection.project_observations(
+                    session, device_id, metric, canonical_observations, owner_id
+                )
+                projected = coerce_ingest_result(written)
+                if (
+                    projected.accepted
+                    or projected.rejected
+                    or projected.deduped_in_batch
+                    or projected.inserted_new is not None
+                    or projected.deduped_existing is not None
+                ):
+                    return projected.to_plugin_result()
+            else:
+                # Canonical observations carry per-sample stream identity, while
+                # the legacy projection accepts one device_id per call. Match
+                # each raw device group to its canonical stream and project it
+                # under that group's resolved legacy device id.
+                groups_by_stream = {}
+                for device_name, device_samples in sample_groups:
+                    stream_id = resolve_apple_origin(owner_id, device_name).stream_id
+                    if stream_id in groups_by_stream:
+                        # Distinct legacy device labels can normalize to the same
+                        # canonical stream. In that ambiguous case, preserve the
+                        # existing raw per-device path instead of guessing.
+                        break
+                    groups_by_stream[stream_id] = (device_name, device_samples)
+                else:
+                    observations_by_stream = {stream_id: [] for stream_id in groups_by_stream}
+                    for observation in canonical_observations:
+                        stream_id = getattr(observation, "stream_id", None)
+                        if stream_id not in observations_by_stream:
+                            break
+                        observations_by_stream[stream_id].append(observation)
+                    else:
+                        projected_summary = IngestWriteResult()
+                        for stream_id, (device_name, _) in groups_by_stream.items():
+                            device_observations = observations_by_stream[stream_id]
+                            if not device_observations:
+                                continue
+                            resolved_device_id = (
+                                device_id
+                                if device_name == first_device_name
+                                else await storage.get_or_create_device(session, device_name)
+                            )
+                            written = await projection.project_observations(
+                                session,
+                                resolved_device_id,
+                                metric,
+                                device_observations,
+                                owner_id,
+                            )
+                            projected_summary = projected_summary.combine(
+                                coerce_ingest_result(written)
+                            )
+
+                        if (
+                            projected_summary.accepted
+                            or projected_summary.rejected
+                            or projected_summary.deduped_in_batch
+                            or projected_summary.inserted_new is not None
+                            or projected_summary.deduped_existing is not None
+                        ):
+                            return projected_summary.to_plugin_result()
+
         summary = IngestWriteResult()
         for device_name, device_samples in sample_groups:
             resolved_device_id = (

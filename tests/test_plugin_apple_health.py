@@ -222,6 +222,176 @@ async def test_apple_health_ingest_projects_from_canonical_observations_when_sup
     assert owner_id == DEFAULT_OWNER_ID
 
 
+@pytest.mark.asyncio
+async def test_apple_health_ingest_projects_mixed_sources_under_their_own_devices():
+    """Canonical projection must preserve per-sample device attribution."""
+    from datetime import UTC, datetime
+
+    from contracts._base import DEFAULT_OWNER_ID, Provenance
+    from contracts.observation import Observation, build_dedup_key
+    from contracts.values import QuantityValue
+    from normalization.identity import resolve_apple_origin
+    from storage.results import IngestWriteResult
+
+    from plugins.sources.apple_health_healthsave import AppleHealthSource
+
+    source_id = "a9b1e7e0-0000-4000-8000-000000000001"
+    observed_at = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+
+    def observation(source: str, value: int, source_record_uid: str) -> Observation:
+        stream_id = resolve_apple_origin(DEFAULT_OWNER_ID, source).stream_id
+        return Observation(
+            metric_id="vital.heart_rate",
+            value=QuantityValue(
+                type="quantity",
+                value=value,
+                unit="bpm",
+                canonical_value=value,
+                canonical_unit="bpm",
+            ),
+            interval_start=observed_at,
+            interval_end=observed_at,
+            source_id=source_id,
+            stream_id=stream_id,
+            source_record_uid=source_record_uid,
+            provenance=Provenance(
+                source_plugin_id="apple-health-healthsave",
+                sdk_version="test",
+                captured_at=observed_at,
+            ),
+            normalizer_id="apple_health",
+            normalizer_version="test",
+            dedup_key=build_dedup_key(
+                owner_id=DEFAULT_OWNER_ID,
+                workspace_id=DEFAULT_OWNER_ID,
+                source_id=source_id,
+                metric_id="vital.heart_rate",
+                interval_start=observed_at,
+                interval_end=observed_at,
+                source_record_uid=source_record_uid,
+            ),
+        )
+
+    peloton_obs = observation("Peloton", 120, "peloton-uuid")
+    withings_obs = observation("Withings", 72, "withings-uuid")
+
+    class RecordingStorage:
+        def __init__(self):
+            self.device_lookups = []
+
+        async def get_or_create_device(self, session, device_name):
+            self.device_lookups.append(device_name)
+            assert device_name == "Withings"
+            return 15
+
+        async def ingest_metric(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("raw storage path should not be used")
+
+    class RecordingProjection:
+        def __init__(self):
+            self.calls = []
+
+        async def project_observations(self, session, device_id, metric, observations, owner_id):
+            observations = list(observations)
+            self.calls.append((device_id, observations))
+            return IngestWriteResult(accepted=len(observations))
+
+    manifest = load_manifest(PLUGIN_DIR / "plugin.yaml")
+    plugin = AppleHealthSource(manifest)
+    storage = RecordingStorage()
+    projection = RecordingProjection()
+
+    result = await plugin.ingest(
+        {
+            "storage": storage,
+            "projection": projection,
+            "session": object(),
+            "device_id": 19,
+            "first_device_name": "Peloton",
+            "metric": "heart_rate",
+            "samples": [
+                {
+                    "date": observed_at.isoformat(),
+                    "qty": 120,
+                    "source": "Peloton",
+                    "uuid": "peloton-uuid",
+                },
+                {
+                    "date": observed_at.isoformat(),
+                    "qty": 72,
+                    "source": "Withings",
+                    "uuid": "withings-uuid",
+                },
+            ],
+            "canonical_observations": [peloton_obs, withings_obs],
+            "owner_id": DEFAULT_OWNER_ID,
+        }
+    )
+
+    assert result["accepted"] == 2
+    assert projection.calls == [
+        (19, [peloton_obs]),
+        (15, [withings_obs]),
+    ]
+    assert storage.device_lookups == ["Withings"]
+
+
+@pytest.mark.asyncio
+async def test_apple_health_ingest_falls_back_when_device_labels_share_a_stream():
+    """Ambiguous normalized streams must keep the exact-label raw device path."""
+    from contracts._base import DEFAULT_OWNER_ID
+    from storage.results import IngestWriteResult
+
+    from plugins.sources.apple_health_healthsave import AppleHealthSource
+
+    class RecordingStorage:
+        def __init__(self):
+            self.device_lookups = []
+            self.ingest_calls = []
+
+        async def get_or_create_device(self, session, device_name):
+            self.device_lookups.append(device_name)
+            return {"withings": 15}[device_name]
+
+        async def ingest_metric(self, session, device_id, metric, samples, owner_id):
+            self.ingest_calls.append((device_id, samples))
+            return IngestWriteResult(accepted=len(samples))
+
+    class ExplodingProjection:
+        async def project_observations(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("ambiguous stream mapping should not be projected")
+
+    samples = [
+        {"date": "2026-09-09T12:00:00Z", "qty": 72, "source": "Withings"},
+        {"date": "2026-09-09T12:01:00Z", "qty": 73, "source": "withings"},
+    ]
+
+    manifest = load_manifest(PLUGIN_DIR / "plugin.yaml")
+    plugin = AppleHealthSource(manifest)
+    storage = RecordingStorage()
+
+    result = await plugin.ingest(
+        {
+            "storage": storage,
+            "projection": ExplodingProjection(),
+            "session": object(),
+            "device_id": 14,
+            "first_device_name": "Withings",
+            "metric": "heart_rate",
+            "samples": samples,
+            "canonical_observations": [object()],
+            "owner_id": DEFAULT_OWNER_ID,
+        }
+    )
+
+    assert result["accepted"] == 2
+    assert storage.device_lookups == ["withings"]
+    assert storage.ingest_calls == [
+        (14, [samples[0]]),
+        (15, [samples[1]]),
+    ]
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Registry-path integration test — addresses advisor concern that the
 # Phase 6 SDK is "decorative" (registered but no test exercises the
