@@ -177,8 +177,93 @@ def test_percent_family_is_per_hundred_on_the_v2_wire() -> None:
 
 def test_heart_rate_fixture_carries_motion_context_and_deletions() -> None:
     raw = _load("heart_rate_batch.json")
-    assert {s["motionContext"] for s in raw["samples"]} == {"sedentary", "active"}
+    # motionContext is HealthKit metadata the Apple Watch sets; the iOS
+    # extractor omits the key when a source (here Withings) doesn't.
+    assert {s["motionContext"] for s in raw["samples"] if "motionContext" in s} == {
+        "sedentary",
+        "active",
+    }
+    assert any("motionContext" not in s for s in raw["samples"])
     assert raw["deletions"], "heart_rate golden must exercise the deletions array"
+
+
+@pytest.mark.asyncio
+async def test_heart_rate_golden_projects_each_source_under_its_own_device() -> None:
+    """The golden carries two sources at one instant (Apple Watch + Withings).
+
+    Real iOS bytes through the real normalizer and plugin: each source's
+    observations must be projected under that source's own legacy device. The
+    projection used to take the first source's device for the whole batch
+    (#39/#40), which on real Postgres collided the concurrent pair on
+    (time, device_id, owner_id) and 422'd the batch; the ``FakeSession``
+    replay below cannot see that, this can.
+    """
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    from contracts._base import Provenance
+    from normalization import normalize_apple_batch
+    from plugin_sdk import load_manifest
+    from storage.results import IngestWriteResult
+
+    from plugins.sources.apple_health_healthsave import AppleHealthSource
+
+    payload = _load("heart_rate_batch.json")
+    samples = payload["samples"]
+    canonical = normalize_apple_batch(
+        payload,
+        source_id=UUID("11111111-1111-1111-1111-111111111111"),
+        provenance=Provenance(
+            source_plugin_id="apple_health",
+            sdk_version="0.1.0",
+            captured_at=datetime(2026, 8, 30, tzinfo=UTC),
+        ),
+    )
+    assert canonical.rejected == 0 and canonical.accepted == len(samples)
+
+    device_ids = {"Apple Watch": 1, "Withings": 2}
+
+    class _Storage:
+        async def get_or_create_device(self, session, device_name):
+            return device_ids[device_name]
+
+        async def ingest_metric(self, *args, **kwargs):
+            raise AssertionError("mixed-source golden must take the projection path")
+
+    class _Projection:
+        def __init__(self) -> None:
+            self.calls: dict[int, list] = {}
+
+        async def project_observations(self, session, device_id, metric, observations, owner_id):
+            self.calls.setdefault(device_id, []).extend(observations)
+            return IngestWriteResult(accepted=len(observations))
+
+    projection = _Projection()
+    plugin = AppleHealthSource(
+        load_manifest(REPO_ROOT / "plugins" / "sources" / "apple_health_healthsave" / "plugin.yaml")
+    )
+    result = await plugin.ingest(
+        {
+            "storage": _Storage(),
+            "projection": projection,
+            "session": object(),
+            "device_id": device_ids[samples[0]["source"]],
+            "first_device_name": samples[0]["source"],
+            "metric": payload["metric"],
+            "samples": samples,
+            "canonical_observations": canonical.observations,
+        }
+    )
+
+    assert result["accepted"] == len(samples)
+    projected = {
+        device_id: sorted(o.source_record_uid for o in observations)
+        for device_id, observations in projection.calls.items()
+    }
+    expected: dict[int, list[str]] = {}
+    for sample in samples:
+        expected.setdefault(device_ids[sample["source"]], []).append(sample["uuid"])
+    assert projected == {device_id: sorted(uids) for device_id, uids in expected.items()}
 
 
 def test_resting_heart_rate_fixture_has_a_real_interval() -> None:
