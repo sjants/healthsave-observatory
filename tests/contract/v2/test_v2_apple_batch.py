@@ -628,25 +628,33 @@ def test_unit_gate_accepts_canonical_and_healthkit_spellings() -> None:
         )
         assert payload.samples[0].unit == unit
 
-    # A different metric with its own spellings validates independently:
+    # Different metrics validate against their own unit spellings:
     # the gate is metric-keyed, not a global unit list.
-    vo2 = V2AppleBatchPayload.model_validate(
-        {
-            **base,
-            "metric": "vo2_max",
-            "samples": [
+    cases = [
+        ("vo2_max", 52.1, ("ml/kg/min", "ml/kg*min", "mL/min·kg")),
+        ("physical_effort", 3.2, ("kcal/kg/hr", "kcal/(kg*hr)", "kcal/hr·kg")),
+        ("workout_effort_score", 5, ("score", "appleEffortScore")),
+        ("estimated_workout_effort_score", 5, ("score", "appleEffortScore")),
+    ]
+    for metric, qty, units in cases:
+        for unit in units:
+            payload = V2AppleBatchPayload.model_validate(
                 {
-                    "uuid": "d2c70000-0000-4000-8000-000000000083",
-                    "startDate": "2026-08-30T07:14:00-04:00",
-                    "endDate": "2026-08-30T07:14:00-04:00",
-                    "qty": 52.1,
-                    "unit": "ml/kg*min",
-                    "source": "Apple Watch",
+                    **base,
+                    "metric": metric,
+                    "samples": [
+                        {
+                            "uuid": "d2c70000-0000-4000-8000-000000000083",
+                            "startDate": "2026-08-30T07:14:00-04:00",
+                            "endDate": "2026-08-30T07:14:00-04:00",
+                            "qty": qty,
+                            "unit": unit,
+                            "source": "Apple Watch",
+                        }
+                    ],
                 }
-            ],
-        }
-    )
-    assert vo2.samples[0].unit == "ml/kg*min"
+            )
+            assert payload.samples[0].unit == unit
 
 
 def test_unit_gate_ignores_unmapped_metrics() -> None:
