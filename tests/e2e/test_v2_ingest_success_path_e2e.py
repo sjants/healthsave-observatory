@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 
 import asyncpg
@@ -43,7 +43,23 @@ def _headers() -> dict[str, str]:
     return {"X-API-Key": API_KEY} if API_KEY else {}
 
 
-def _v2_heart_rate_batch(uuid: str, *, deletions: list[dict] | None = None) -> dict:
+def _run_unique_start() -> datetime:
+    """A heart-rate slot no earlier run can have claimed (issue #34).
+
+    A fixed timestamp made the test depend on the previous run finishing:
+    an interrupted ``make e2e`` skips ``down -v`` and strands an active row
+    on the legacy partial unique index (time, device_id, owner_id), which
+    the next run's new uuid then collides with. A week back keeps the point
+    inside the ``range=1y`` series window asserted below; the -04:00 offset
+    matches the sample's ``tzOffsetMinutes``.
+    """
+    return datetime.now(timezone(timedelta(hours=-4))) - timedelta(days=7)
+
+
+def _v2_heart_rate_batch(
+    uuid: str, *, start: datetime | None = None, deletions: list[dict] | None = None
+) -> dict:
+    start = start or _run_unique_start()
     return {
         "schema_version": 2,
         "metric": "heart_rate",
@@ -54,8 +70,8 @@ def _v2_heart_rate_batch(uuid: str, *, deletions: list[dict] | None = None) -> d
         "samples": [
             {
                 "uuid": uuid,
-                "startDate": "2026-08-30T07:14:00-04:00",
-                "endDate": "2026-08-30T07:14:00-04:00",
+                "startDate": start.isoformat(),
+                "endDate": start.isoformat(),
                 "qty": 52,
                 "unit": "count/min",
                 "source": "e2e Apple Watch",
@@ -112,13 +128,16 @@ def test_v2_success_path_canonical_projection_supersede_and_capture_context() ->
        the dedicated row (both statuses flip; nothing stale remains).
     """
     uid = str(uuid4())
+    start = _run_unique_start()
 
     with httpx.Client(base_url=BASE_URL, timeout=30) as client:
         assert client.get("/ready").json().get("database") == "ok"
 
         # 1) ingest the v2 batch
         resp = client.post(
-            "/api/v2/apple/batch", json=_v2_heart_rate_batch(uid), headers=_headers()
+            "/api/v2/apple/batch",
+            json=_v2_heart_rate_batch(uid, start=start),
+            headers=_headers(),
         )
         assert resp.status_code in (200, 201, 202), f"{resp.status_code} {resp.text[:400]}"
         receipt = resp.json()
@@ -179,7 +198,7 @@ def test_v2_success_path_canonical_projection_supersede_and_capture_context() ->
         # 5) deletion supersedes both halves
         resp = client.post(
             "/api/v2/apple/batch",
-            json=_v2_heart_rate_batch(str(uuid4()), deletions=[{"uuid": uid}]),
+            json=_v2_heart_rate_batch(str(uuid4()), start=start, deletions=[{"uuid": uid}]),
             headers=_headers(),
         )
         assert resp.status_code in (200, 201, 202), f"{resp.status_code} {resp.text[:400]}"
