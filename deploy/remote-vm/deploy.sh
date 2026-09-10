@@ -12,6 +12,11 @@ DB_PORT="${DB_PORT:-15432}"
 DB_PUBLISH_PORT="${HEALTH_DATA_HUB_DB_PUBLISH_PORT:-$DB_PORT}"
 PROJECT_NAME="${PROJECT_NAME:-health-data-hub}"
 DATABASE_MODE="${HEALTH_DATA_HUB_DATABASE_MODE:-compose}"
+# Services this rollout leaves alone (space-separated), e.g. the profile-gated
+# homeassistant-mqtt bridge when the operator has stopped it on purpose:
+# COMPOSE_TARGETS names it explicitly, and Compose starts an explicitly named
+# service whatever its profile. Default empty: roll out everything, as before.
+SKIP_SERVICES="${HEALTH_DATA_HUB_DEPLOY_SKIP_SERVICES:-}"
 EXTERNAL_DB_HOST="${HEALTH_DATA_HUB_DB_HOST:-postgres.example.internal}"
 EXTERNAL_DB_PORT="${HEALTH_DATA_HUB_DB_PORT:-5432}"
 EXTERNAL_DB_NAME="${HEALTH_DATA_HUB_DB_NAME:-healthsave}"
@@ -48,6 +53,14 @@ case "$DATABASE_MODE" in
   compose|external) ;;
   *)
     echo "HEALTH_DATA_HUB_DATABASE_MODE must be 'compose' or 'external'" >&2
+    exit 1
+    ;;
+esac
+
+# The skip list is interpolated into the remote root shell: service names only.
+case "$SKIP_SERVICES" in
+  *[!a-z0-9\ -]*)
+    echo "HEALTH_DATA_HUB_DEPLOY_SKIP_SERVICES takes space-separated compose service names" >&2
     exit 1
     ;;
 esac
@@ -188,6 +201,11 @@ services:
 EOF
 COMPOSE_TARGETS=\"db migrate api worker homeassistant-mqtt grafana web\"
 fi
+for skipped in $SKIP_SERVICES; do
+  COMPOSE_TARGETS=\" \$COMPOSE_TARGETS \"
+  COMPOSE_TARGETS=\"\${COMPOSE_TARGETS/ \$skipped / }\"
+  echo \"leaving \$skipped untouched (HEALTH_DATA_HUB_DEPLOY_SKIP_SERVICES)\"
+done
 docker compose --env-file \"$REMOTE_ENV_DIR/.env\" \
   -f docker-compose.yml \
   -f docker-compose.remote-vm.override.yml \
