@@ -478,14 +478,17 @@ async def test_run_anomaly_check_respects_recent_cooldown_without_creating_run()
 @pytest.mark.asyncio
 async def test_run_anomaly_check_dedupes_already_persisted_anomalies():
     """Rolling checks should not insert the same anomaly every cron tick."""
-    observed_at = "2026-04-19T12:00:00+00:00"
+    observed_at = datetime(2026, 4, 19, 12, 0, tzinfo=UTC)
+    existing_anomaly = Anomaly(
+        metric="heart_rate",
+        magnitude=3.0,
+        direction="up",
+        severity="alert",
+        detected_at=observed_at,
+    )
     existing = _Row(
         metric="heart_rate",
-        structured_data={
-            "metric": "heart_rate",
-            "detected_at": observed_at,
-            "direction": "up",
-        },
+        structured_data=existing_anomaly.model_dump(mode="json"),
     )
     session = _FakeSession(run_queue=[5000, 5001], select_queue=[[], [existing]])
     llm_mock = AsyncMock()
@@ -504,7 +507,7 @@ async def test_run_anomaly_check_dedupes_already_persisted_anomalies():
                 magnitude=3.0,
                 direction="up",
                 severity="alert",
-                detected_at=datetime.fromisoformat(observed_at),
+                detected_at=observed_at,
             ),
             Anomaly(metric="hrv", magnitude=-3.2, direction="down", severity="alert"),
         ]
